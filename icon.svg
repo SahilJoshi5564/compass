@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#2E6F40"/>
+  <circle cx="256" cy="256" r="176" fill="#F4FBF6" stroke="#CFFFDC" stroke-width="10"/>
+  <circle cx="256" cy="256" r="176" fill="none" stroke="#2E6F40" stroke-width="4" opacity="0.25"/>
+  <!-- compass needle -->
+  <path d="M256 120 L288 256 L256 392 L224 256 Z" fill="#2E6F40"/>
+  <path d="M256 120 L288 256 L256 256 Z" fill="#C1734A"/>
+  <path d="M256 392 L224 256 L256 256 Z" fill="#68BA7F"/>
+  <circle cx="256" cy="256" r="14" fill="#253D2C"/>
+  <!-- tick marks -->
+  <circle cx="256" cy="256" r="152" fill="none" stroke="#68BA7F" stroke-width="3" stroke-dasharray="2 14" opacity="0.7"/>
+</svg>
