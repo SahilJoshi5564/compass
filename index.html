@@ -387,21 +387,28 @@ async function extractPdfText(file){
   return text;
 }
 const AIRLINES=['IndiGo','Air India Express','Air India','SpiceJet','Vistara','Go First','GoAir','AirAsia India','AirAsia','Akasa Air','TAP Air Portugal','TAP Portugal','Emirates','Qatar Airways','Etihad Airways','Etihad','Lufthansa','British Airways','Air France','KLM','Singapore Airlines','Thai Airways','American Airlines','United Airlines','Delta Air Lines','Delta','Turkish Airlines','Cathay Pacific','Malaysia Airlines','Qantas','ANA','Japan Airlines','Saudia','Oman Air','Sri Lankan Airlines','SriLankan'];
+function escapeRegex(s){ return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); }
 function guessAirline(text){
   // 1. Prefer an explicitly labeled airline/carrier over an incidental mention
-  //    (e-tickets often mention other airlines in codeshare/interline fine print)
   let m=text.match(/\b(?:Operated\s*by|Airline|Carrier)\s*[:\-]?\s*([A-Za-z][A-Za-z .]{2,28})/i);
   if(m){
     const candidate=m[1].trim().toLowerCase();
     const hit=AIRLINES.find(a=>candidate.includes(a.toLowerCase())||a.toLowerCase().includes(candidate));
     if(hit)return hit;
   }
-  // 2. Otherwise scan only the first ~1500 characters (the header/summary section,
-  //    where the booked airline is actually printed) before checking the whole document
-  const head=text.slice(0,1500).toLowerCase();
-  for(const a of AIRLINES){ if(head.includes(a.toLowerCase())) return a; }
-  const flat=text.toLowerCase();
-  for(const a of AIRLINES){ if(flat.includes(a.toLowerCase())) return a; }
+  // 2. Directly detect "<Name> Airlines" / "<Name> Airways" / "Air <Name>" patterns in the
+  //    original (case-preserved) text — covers carriers not in our list (Frontier, Southwest,
+  //    Alaska, Ryanair, etc.) without needing an exhaustive lookup table.
+  m=text.match(/\b([A-Z][A-Za-z]+(?:\s[A-Z][A-Za-z]+){0,2}\s(?:Airlines|Airways))\b/);
+  if(m)return m[1].replace(/\s+/g,' ').trim();
+  m=text.match(/\bAir\s([A-Z][A-Za-z]{2,})\b/);
+  if(m && !/^(?:Ticket|Fare|Travel|India\s*e)$/i.test(m[1]))return ('Air '+m[1]).trim();
+  // 3. Fall back to the known-airline list, but with word-boundary matching only —
+  //    a plain substring check lets 3-4 letter codes like "ANA" false-match inside
+  //    ordinary words (e.g. "ANA" inside "Manage").
+  const head=text.slice(0,1500);
+  for(const a of AIRLINES){ if(new RegExp('\\b'+escapeRegex(a)+'\\b','i').test(head)) return a; }
+  for(const a of AIRLINES){ if(new RegExp('\\b'+escapeRegex(a)+'\\b','i').test(text)) return a; }
   return null;
 }
 function guessDateISO(str){
@@ -416,12 +423,45 @@ function guessDateISO(str){
 }
 const DATE_PATTERN='(\\d{1,2}[\\s\\-][A-Za-z]{3,9}[\\s,\\-]+\\d{4}|\\d{4}-\\d{2}-\\d{2}|\\d{1,2}\\/\\d{1,2}\\/\\d{4})';
 function guessLabeledDate(text,labels){
-  // Search near explicit labels first (e.g. "Departure", "Date of Journey") so we don't
-  // accidentally grab an unrelated date (issue date, date of birth, fare validity, etc.)
   for(const label of labels){
     const re=new RegExp('\\b'+label+'[^.\\n]{0,25}?'+DATE_PATTERN,'i');
     const m=text.match(re);
     if(m){const d=guessDateISO(m[1]);if(d)return d;}
+  }
+  return null;
+}
+const MONTH_RE='jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
+const MONTHNUM={jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12};
+function guessDateNearTime(text){
+  // Whatever the ticket's layout, the departure date is almost always printed right next to
+  // the departure time — far more reliable across providers than any specific label word,
+  // and it sidesteps other dates in the document (booking/issue date, fare validity, DOB).
+  const timeMatch=text.match(/\b([01]?\d|2[0-3]):([0-5]\d)\s*(?:hrs?)?\b/i);
+  if(!timeMatch)return null;
+  const idx=timeMatch.index;
+  const near=text.slice(Math.max(0,idx-40),idx+140);
+
+  // a) a full date (with year) right next to the time
+  let d=guessDateISO(near);
+  if(d)return d;
+
+  // b) a partial date near the time (e.g. "Sun, Aug 30" — no year on a Goibibo-style ticket) —
+  //    find the day+month, then look for a matching full date with a year anywhere in the doc
+  let pm=near.match(new RegExp('\\b('+MONTH_RE+')\\.?\\s+(\\d{1,2})\\b','i'));
+  let day,mon;
+  if(pm){ mon=pm[1]; day=pm[2]; }
+  else{
+    pm=near.match(new RegExp('\\b(\\d{1,2})\\s+('+MONTH_RE+')\\.?\\b','i'));
+    if(pm){ day=pm[1]; mon=pm[2]; }
+  }
+  if(day && mon){
+    const monNum=MONTHNUM[mon.slice(0,3).toLowerCase()];
+    if(monNum){
+      const dayPad=day.padStart?day.padStart(2,'0'):('0'+day).slice(-2);
+      const fullRe=new RegExp('\\b0?'+day+'[\\s,\\-]+(?:'+MONTH_RE+')[a-z]*[\\s,\\-]+(\\d{4})\\b|\\b(?:'+MONTH_RE+')[a-z]*[\\s,\\-]+0?'+day+'[\\s,\\-]+(\\d{4})\\b','i');
+      const fm=text.match(fullRe);
+      if(fm){ const year=fm[1]||fm[2]; return year+'-'+String(monNum).padStart(2,'0')+'-'+dayPad; }
+    }
   }
   return null;
 }
@@ -449,7 +489,7 @@ function parseBookingText(text){
     result.airline=guessAirline(text);
     m=flat.match(/\b([A-Z]{3})\s*(?:-|to|→|—|>)\s*([A-Z]{3})\b/);
     if(m){result.from=m[1];result.to=m[2];}
-    const flightDate=guessLabeledDate(flat,['Departure(?:\\s*Date)?','Date\\s*of\\s*Journey','Travel\\s*Date','Flight\\s*Date','DOJ']);
+    const flightDate=guessDateNearTime(flat)||guessLabeledDate(flat,['Departure(?:\\s*Date)?','Date\\s*of\\s*Journey','Travel\\s*Date','Flight\\s*Date','DOJ']);
     if(flightDate)result.date=flightDate;
   }
   if(result.type==='train'){
@@ -461,7 +501,7 @@ function parseBookingText(text){
     m=flat.match(/\bCoach\s*[:\-]?\s*([A-Z0-9]{1,4})\b/i); if(m)coach=m[1];
     m=flat.match(/\bSeat\s*(?:No\.?)?\s*[:\-]?\s*([\d,\s]{1,15})\b/i); if(m)seat=m[1].trim();
     if(coach||seat)result.seatNumbers=(coach?coach+' ':'')+seat;
-    const journeyDate=guessLabeledDate(flat,['Date\\s*of\\s*Journey','DOJ','Travel\\s*Date']);
+    const journeyDate=guessDateNearTime(flat)||guessLabeledDate(flat,['Date\\s*of\\s*Journey','DOJ','Travel\\s*Date']);
     if(journeyDate)result.date=journeyDate;
   }
   if(result.type==='stay'){
