@@ -363,7 +363,7 @@ function tripStatus(trip){
   if(trip.tentative || !trip.startDate) return 'tentative';
   const t=todayStr();
   if(t<trip.startDate) return 'planned';
-  if(trip.endDate && t>trip.endDate) return 'past';
+  if(t>(trip.endDate||trip.startDate)) return 'past';
   return 'active';
 }
 function tripDateLabel(trip){
@@ -374,13 +374,20 @@ function tripDateLabel(trip){
 
 /* ---------------- router ---------------- */
 let route={view:'home'};
+let lastHash=null;
 function nav(r){
   if(r.view!=='trip' || r.id!==route.id) activityFilter='all';
-  route=r; location.hash=encodeURIComponent(JSON.stringify(r)); render();
+  route=r;
+  const newHash=encodeURIComponent(JSON.stringify(r));
+  lastHash=newHash;
+  location.hash=newHash;
+  render();
 }
 window.addEventListener('hashchange',()=>{
+  if(location.hash===lastHash) return; // already handled by nav()
   try{route=JSON.parse(decodeURIComponent(location.hash.slice(1))||'{}');}catch(e){route={view:'home'};}
   if(!route.view)route={view:'home'};
+  lastHash=location.hash;
   render();
 });
 
@@ -389,6 +396,7 @@ async function init(){
   if(location.hash.length>1){
     try{route=JSON.parse(decodeURIComponent(location.hash.slice(1)));}catch(e){}
   }
+  lastHash=location.hash;
   render();
 }
 
@@ -525,10 +533,6 @@ function tabBtn(tripId,key,icon,label,active){
 }
 
 /* ---- Tasks tab: pre-trip tasks + packing list ---- */
-function daysUntil(dateStr){
-  if(!dateStr) return null;
-  return Math.round((new Date(dateStr+'T00:00:00')-new Date(todayStr()+'T00:00:00'))/86400000);
-}
 function taskDueBadge(t,trip){
   if(!t.dueOffsetDays || !trip.startDate) return '';
   const dueDate=new Date(trip.startDate+'T00:00:00');
@@ -581,7 +585,7 @@ function tasksTabHTML(trip,tasks,packing){
         html+=`<div class="check-row ${t.done?'done':''}">
           <button class="box" onclick="toggleItem('tasks','${t.id}',${!t.done})"></button>
           <div class="info" onclick="openTaskForm('${trip.id}','${t.id}')" style="cursor:pointer;"><div class="t1">${esc(t.title)}</div>${t.note?`<div class="t2">${esc(t.note)}</div>`:''}</div>
-          ${taskDueBadge(t,trip)}
+          ${!t.done?taskDueBadge(t,trip):''}
         </div>`;
       }
     });
@@ -744,7 +748,11 @@ function openSheet(html){
   document.getElementById('sheet').innerHTML=html;
   document.getElementById('overlay').classList.add('open');
 }
-function closeSheet(){document.getElementById('overlay').classList.remove('open');}
+function closeSheet(){
+  document.getElementById('overlay').classList.remove('open');
+  pickedSingle={};
+  pendingActivityFile=null;
+}
 
 /* ---- Create trip ---- */
 let pickedSingle={};
@@ -961,6 +969,7 @@ function onActivityTypeChange(type){
   document.getElementById('flight-fields').classList.toggle('hidden',type!=='flight');
   document.getElementById('train-fields').classList.toggle('hidden',type!=='train');
   document.getElementById('stay-fields').classList.toggle('hidden',type!=='stay');
+  document.getElementById('generic-date-fields').classList.toggle('hidden',type==='stay');
 }
 async function openActivityForm(tripId,activityId){
   const editing=activityId?await idGet('activities',activityId):null;
@@ -973,7 +982,7 @@ async function openActivityForm(tripId,activityId){
       </div>
     </div>
     <div class="field"><label>Title</label><input id="f-title" placeholder="e.g. Belém Tower / Flight to Porto" value="${esc(src.title||'')}"></div>
-    <div class="field-row">
+    <div class="field-row" id="generic-date-fields">
       <div class="field"><label>Date <span style="color:var(--muted)">(optional)</span></label><input id="f-date" type="date" value="${src.date||''}"></div>
       <div class="field"><label>Time <span style="color:var(--muted)">(optional)</span></label><input id="f-time" type="time" value="${src.time||''}"></div>
     </div>
@@ -1035,7 +1044,7 @@ async function saveActivity(tripId,activityId){
   if(!title){toast('Give it a title');return;}
   const existing=activityId?await idGet('activities',activityId):null;
   const activity={id:activityId||uid(),tripId,type,title,date,time,notes};
-  if(existing&&existing.ticketFile&&!pendingActivityFile) activity.ticketFile=existing.ticketFile;
+  if(existing&&existing.ticketFile&&!pendingActivityFile&&(type==='flight'||type==='train')) activity.ticketFile=existing.ticketFile;
   if(type==='flight'){
     activity.airline=document.getElementById('f-airline').value.trim();
     activity.pnr=document.getElementById('f-pnr').value.trim();
@@ -1079,13 +1088,20 @@ async function handleTaskFile(id,file){
   await idPut('tasks',item);
   toast('Uploaded'); render();
 }
-async function viewFile(store,id,field){
+function viewFile(store,id,field){
   if(window.event) window.event.stopPropagation();
-  const item=await idGet(store,id);
-  const file=item&&item[field];
-  if(!file){toast('No file uploaded yet');return;}
-  const url=URL.createObjectURL(file);
-  window.open(url,'_blank');
+  const win=window.open('','_blank');
+  idGet(store,id).then(item=>{
+    const file=item&&item[field];
+    if(!file){
+      if(win) win.close();
+      toast('No file uploaded yet');
+      return;
+    }
+    const url=URL.createObjectURL(file);
+    if(win){ win.location.href=url; }
+    else { toast('Pop-up blocked — allow pop-ups for this site to view files'); }
+  });
 }
 function openMaps(location){
   if(window.event) window.event.stopPropagation();
