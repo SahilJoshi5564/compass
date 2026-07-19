@@ -8,6 +8,7 @@
 <meta name="theme-color" content="#F4FBF6">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon-192.png">
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap');
 
@@ -274,7 +275,8 @@ h2.section-title .add{color:var(--flap);font-size:11px;letter-spacing:0.3px;text
 .backlink svg{flex:none;}
 .backlink:active{background:var(--panel-2);color:var(--flap);}
 .trip-hero{margin-bottom:6px;}
-.trip-hero .name{font-family:'Poppins',sans-serif;font-weight:700;font-size:24px;color:var(--paper);}
+.trip-hero .name{font-family:'Poppins',sans-serif;font-weight:700;font-size:24px;color:var(--paper);display:flex;align-items:center;gap:8px;}
+.hero-edit{color:var(--muted);display:inline-flex;}
 .trip-hero .dates{color:var(--muted);font-size:13px;margin-top:3px;display:flex;align-items:center;gap:8px;font-weight:500;}
 .toast{
   position:fixed;bottom:100px;left:50%;transform:translateX(-50%);
@@ -340,7 +342,8 @@ const ICONS={
   upload:'<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V9"/><path d="M7 14l5-5 5 5"/><path d="M5 3h14"/></svg>',
   mapPin:'<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 6-9 12-9 12s-9-6-9-12a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>',
   file:'<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>',
-  plane:'<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l18-7-7 18-2-8-9-3z"/></svg>'
+  plane:'<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l18-7-7 18-2-8-9-3z"/></svg>',
+  edit:'<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>'
 };
 
 /* ---------------- helpers ---------------- */
@@ -359,6 +362,172 @@ function todayStr(){return new Date().toISOString().slice(0,10);}
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');clearTimeout(toast._h);toast._h=setTimeout(()=>t.classList.remove('show'),1800);}
 function esc(s){return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function catLabel(c){return c?c.charAt(0).toUpperCase()+c.slice(1):'Other';}
+function groupByCurrency(expenses){
+  const map={};
+  expenses.forEach(e=>{
+    const cur=(e.currency||'').toUpperCase()||'INR';
+    map[cur]=(map[cur]||0)+Number(e.amount||0);
+  });
+  return map;
+}
+
+/* ---------------- booking autofill (PDF text extraction + heuristics) ---------------- */
+if(typeof pdfjsLib!=='undefined'){
+  pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+}
+async function extractPdfText(file){
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  let text='';
+  for(let i=1;i<=pdf.numPages;i++){
+    const page=await pdf.getPage(i);
+    const content=await page.getTextContent();
+    text+=content.items.map(it=>it.str).join(' ')+'\n';
+  }
+  return text;
+}
+const AIRLINES=['IndiGo','Air India Express','Air India','SpiceJet','Vistara','Go First','GoAir','AirAsia India','AirAsia','Akasa Air','TAP Air Portugal','TAP Portugal','Emirates','Qatar Airways','Etihad Airways','Etihad','Lufthansa','British Airways','Air France','KLM','Singapore Airlines','Thai Airways','American Airlines','United Airlines','Delta Air Lines','Delta','Turkish Airlines','Cathay Pacific','Malaysia Airlines','Qantas','ANA','Japan Airlines','Saudia','Oman Air','Sri Lankan Airlines','SriLankan'];
+function guessAirline(text){
+  // 1. Prefer an explicitly labeled airline/carrier over an incidental mention
+  //    (e-tickets often mention other airlines in codeshare/interline fine print)
+  let m=text.match(/\b(?:Operated\s*by|Airline|Carrier)\s*[:\-]?\s*([A-Za-z][A-Za-z .]{2,28})/i);
+  if(m){
+    const candidate=m[1].trim().toLowerCase();
+    const hit=AIRLINES.find(a=>candidate.includes(a.toLowerCase())||a.toLowerCase().includes(candidate));
+    if(hit)return hit;
+  }
+  // 2. Otherwise scan only the first ~1500 characters (the header/summary section,
+  //    where the booked airline is actually printed) before checking the whole document
+  const head=text.slice(0,1500).toLowerCase();
+  for(const a of AIRLINES){ if(head.includes(a.toLowerCase())) return a; }
+  const flat=text.toLowerCase();
+  for(const a of AIRLINES){ if(flat.includes(a.toLowerCase())) return a; }
+  return null;
+}
+function guessDateISO(str){
+  const months={jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12};
+  let m=str.match(/\b(\d{1,2})[\s\-]([A-Za-z]{3,9})[\s,\-]+(\d{4})\b/);
+  if(m){const mon=months[m[2].slice(0,3).toLowerCase()];if(mon)return m[3]+'-'+String(mon).padStart(2,'0')+'-'+String(m[1]).padStart(2,'0');}
+  m=str.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
+  if(m)return m[0];
+  m=str.match(/\b(\d{1,2})\/(\d{1,2})\/(20\d{2})\b/);
+  if(m)return m[3]+'-'+String(m[2]).padStart(2,'0')+'-'+String(m[1]).padStart(2,'0');
+  return null;
+}
+const DATE_PATTERN='(\\d{1,2}[\\s\\-][A-Za-z]{3,9}[\\s,\\-]+\\d{4}|\\d{4}-\\d{2}-\\d{2}|\\d{1,2}\\/\\d{1,2}\\/\\d{4})';
+function guessLabeledDate(text,labels){
+  // Search near explicit labels first (e.g. "Departure", "Date of Journey") so we don't
+  // accidentally grab an unrelated date (issue date, date of birth, fare validity, etc.)
+  for(const label of labels){
+    const re=new RegExp('\\b'+label+'[^.\\n]{0,25}?'+DATE_PATTERN,'i');
+    const m=text.match(re);
+    if(m){const d=guessDateISO(m[1]);if(d)return d;}
+  }
+  return null;
+}
+function guessTime(str){
+  const m=str.match(/\b([01]?\d|2[0-3]):([0-5]\d)\s*(AM|PM|am|pm)?\b/);
+  if(!m)return null;
+  let h=parseInt(m[1],10);
+  if(m[3]){const ap=m[3].toLowerCase();if(ap==='pm'&&h<12)h+=12;if(ap==='am'&&h===12)h=0;}
+  return String(h).padStart(2,'0')+':'+m[2];
+}
+function parseBookingText(text){
+  const result={type:null};
+  const flat=text.replace(/\s+/g,' ');
+  const hasIRCTC=/IRCTC|\bTrain\s*No\b|\bCoach\b[^.]{0,30}\bSeat\b|PNR\s*[:\-]?\s*\d{10}\b/i.test(flat);
+  const hasFlightHints=/Boarding Pass|E-?Ticket|\bPNR\b|Flight\s*No|\bDeparture\b|Airlines?\b/i.test(flat)||/\b[A-Z]{3}\s*(?:-|to|→)\s*[A-Z]{3}\b/.test(flat);
+  const hasHotelHints=/Check-?in|Check-?out|\bHotel\b|Room Type|Booking\.com|Agoda|Reservation/i.test(flat);
+  if(hasIRCTC)result.type='train';
+  else if(hasHotelHints&&!hasFlightHints)result.type='stay';
+  else if(hasFlightHints)result.type='flight';
+
+  let m=flat.match(/\bPNR\s*(?:No\.?|Number)?\s*[:\-]?\s*([A-Z0-9]{5,10})\b/i);
+  if(m)result.pnr=m[1];
+
+  if(result.type==='flight'||!result.type){
+    result.airline=guessAirline(text);
+    m=flat.match(/\b([A-Z]{3})\s*(?:-|to|→|—|>)\s*([A-Z]{3})\b/);
+    if(m){result.from=m[1];result.to=m[2];}
+    const flightDate=guessLabeledDate(flat,['Departure(?:\\s*Date)?','Date\\s*of\\s*Journey','Travel\\s*Date','Flight\\s*Date','DOJ']);
+    if(flightDate)result.date=flightDate;
+  }
+  if(result.type==='train'){
+    m=flat.match(/\bTrain\s*(?:No\.?|Number)?\s*[:\-]?\s*(\d{4,5})\b/i);
+    if(m)result.trainNumber=m[1];
+    m=flat.match(/\bFrom\s*[:\-]?\s*([A-Za-z .]{3,30}?)\s+To\s*[:\-]?\s*([A-Za-z .]{3,30}?)\b/i);
+    if(m){result.from=m[1].trim();result.to=m[2].trim();}
+    let coach='',seat='';
+    m=flat.match(/\bCoach\s*[:\-]?\s*([A-Z0-9]{1,4})\b/i); if(m)coach=m[1];
+    m=flat.match(/\bSeat\s*(?:No\.?)?\s*[:\-]?\s*([\d,\s]{1,15})\b/i); if(m)seat=m[1].trim();
+    if(coach||seat)result.seatNumbers=(coach?coach+' ':'')+seat;
+    const journeyDate=guessLabeledDate(flat,['Date\\s*of\\s*Journey','DOJ','Travel\\s*Date']);
+    if(journeyDate)result.date=journeyDate;
+  }
+  if(result.type==='stay'){
+    m=flat.match(/\bCheck-?in\s*[:\-]?\s*([^,;]{4,20})/i);
+    if(m){const d=guessDateISO(m[1]);if(d)result.checkIn=d;}
+    m=flat.match(/\bCheck-?out\s*[:\-]?\s*([^,;]{4,20})/i);
+    if(m){const d=guessDateISO(m[1]);if(d)result.checkOut=d;}
+    m=flat.match(/\bAddress\s*[:\-]?\s*([^\n]{8,80})/i);
+    if(m)result.location=m[1].trim();
+    const lines=text.split('\n').map(l=>l.trim()).filter(Boolean);
+    const hotelLine=lines.find(l=>/hotel|resort|inn\b/i.test(l)&&l.length<60);
+    if(hotelLine||( lines[0]&&lines[0].length<60)) result.title=hotelLine||lines[0];
+  }
+  if(!result.date && !result.checkIn){
+    const d=guessDateISO(flat); if(d)result.date=d;
+  }
+  const t=guessTime(flat); if(t)result.time=t;
+  return result;
+}
+async function handleActivityFileAttach(file){
+  if(!file)return;
+  pendingActivityFile=file;
+  const note=document.getElementById('attach-status');
+  const setNote=(msg,color)=>{if(note){note.textContent=msg;note.style.color=color;}};
+  if(file.type!=='application/pdf'){
+    setNote('Photo attached — auto-fill only works for PDF tickets right now, fill in details below','var(--rose)');
+    return;
+  }
+  setNote('Reading file…','var(--flap)');
+  try{
+    const text=await extractPdfText(file);
+    const parsed=parseBookingText(text);
+    if(!parsed.type){
+      setNote("Attached — couldn't auto-detect the details, fill them in below",'var(--rose)');
+      return;
+    }
+    pickSingle('f-type',parsed.type);
+    onActivityTypeChange(parsed.type);
+    const titleEl=document.getElementById('f-title');
+    if(parsed.date)document.getElementById('f-date').value=parsed.date;
+    if(parsed.time)document.getElementById('f-time').value=parsed.time;
+    if(parsed.type==='flight'){
+      if(parsed.airline)document.getElementById('f-airline').value=parsed.airline;
+      if(parsed.pnr)document.getElementById('f-pnr').value=parsed.pnr;
+      if(parsed.from)document.getElementById('f-from').value=parsed.from;
+      if(parsed.to)document.getElementById('f-to').value=parsed.to;
+      if(titleEl&&!titleEl.value&&parsed.to)titleEl.value='Flight to '+parsed.to;
+    }
+    if(parsed.type==='train'){
+      if(parsed.from)document.getElementById('f-train-from').value=parsed.from;
+      if(parsed.to)document.getElementById('f-train-to').value=parsed.to;
+      if(parsed.trainNumber)document.getElementById('f-train-num').value=parsed.trainNumber;
+      if(parsed.seatNumbers)document.getElementById('f-train-seat').value=parsed.seatNumbers;
+      if(titleEl&&!titleEl.value&&parsed.to)titleEl.value='Train to '+parsed.to;
+    }
+    if(parsed.type==='stay'){
+      if(parsed.location)document.getElementById('f-location').value=parsed.location;
+      if(parsed.checkIn)document.getElementById('f-checkin').value=parsed.checkIn;
+      if(parsed.checkOut)document.getElementById('f-checkout').value=parsed.checkOut;
+      if(titleEl&&!titleEl.value&&parsed.title)titleEl.value=parsed.title;
+    }
+    setNote('Filled in from the PDF — please double-check before saving','var(--teal)');
+  }catch(err){
+    setNote('Could not read this PDF automatically — fill in details below','var(--rose)');
+  }
+}
 function tripStatus(trip){
   if(trip.tentative || !trip.startDate) return 'tentative';
   const t=todayStr();
@@ -479,9 +648,10 @@ function todayStripHTML(trip,activities,expenses){
   const todayItems=activities.filter(a=>a.date===t && a.type!=='stay')
     .sort((a,b)=>(a.time||'').localeCompare(b.time||''));
   const tonightStay=activities.find(stayCoversToday);
-  const todaySpend=expenses.filter(e=>e.date===t).reduce((s,e)=>s+Number(e.amount||0),0);
+  const todaySpendByCur=groupByCurrency(expenses.filter(e=>e.date===t));
+  const todaySpendCurs=Object.keys(todaySpendByCur);
 
-  if(!todayItems.length && !tonightStay && !todaySpend) return '';
+  if(!todayItems.length && !tonightStay && !todaySpendCurs.length) return '';
   let html=`<div class="today-strip">
     <div class="ts-head">Today</div>`;
   todayItems.forEach(a=>{
@@ -490,7 +660,9 @@ function todayStripHTML(trip,activities,expenses){
   if(tonightStay){
     html+=`<div class="ts-item"><span class="ts-time">🌙</span><span class="ts-title">${esc(tonightStay.title)}${tonightStay.location?` · <span class="map-link" onclick="openMaps('${esc(tonightStay.location).replace(/'/g,"\\'")}')">${ICONS.mapPin}map</span>`:''}</span><span class="badge stay">stay</span></div>`;
   }
-  html+=`<div class="ts-item ts-spend"><span class="ts-time">${ICONS.expenses}</span><span class="ts-title">Spent today</span><span class="ts-amt">${fmtMoney(todaySpend,trip.baseCurrency||'INR')}</span></div>`;
+  if(todaySpendCurs.length){
+    html+=`<div class="ts-item ts-spend"><span class="ts-time">${ICONS.expenses}</span><span class="ts-title">Spent today</span><span class="ts-amt">${todaySpendCurs.map(c=>fmtMoney(todaySpendByCur[c],c)).join(' + ')}</span></div>`;
+  }
   html+=`</div>`;
   return html;
 }
@@ -511,8 +683,8 @@ async function renderTrip(tripId,tab){
     <div class="backlink" onclick="nav({view:'home'})">${ICONS.chevronLeft}<span>Trips</span></div>
   </header>
   <main>
-    <div class="trip-hero">
-      <div class="name">${esc(trip.destination)}</div>
+    <div class="trip-hero" onclick="openTripForm('${trip.id}')" style="cursor:pointer;">
+      <div class="name">${esc(trip.destination)} <span class="hero-edit">${ICONS.edit}</span></div>
       <div class="dates mono">${tripDateLabel(trip)} <span class="tag">${trip.tripType||'domestic'}</span></div>
     </div>
     ${todayStripHTML(trip,activities,expenses)}
@@ -613,18 +785,37 @@ function tasksTabHTML(trip,tasks,packing){
 /* ---- Expenses tab ---- */
 function expensesTabHTML(trip,expenses){
   expenses=expenses.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
-  const total=expenses.reduce((s,e)=>s+Number(e.amount||0),0);
+  const totals=groupByCurrency(expenses);
+  const currencies=Object.keys(totals);
   const status=tripStatus(trip);
-  let dailyAvgHTML='';
+  let days=null;
   if(trip.startDate && (status==='active'||status==='past')){
     const endRef = status==='active' ? todayStr() : trip.endDate||todayStr();
-    const days=Math.max(1,Math.round((new Date(endRef+'T00:00:00')-new Date(trip.startDate+'T00:00:00'))/86400000)+1);
-    dailyAvgHTML=`<div class="stat"><div class="val mono">${fmtMoney(total/days,trip.baseCurrency||'INR')}</div><div class="lbl">daily average</div></div>`;
+    days=Math.max(1,Math.round((new Date(endRef+'T00:00:00')-new Date(trip.startDate+'T00:00:00'))/86400000)+1);
   }
-  let html=`<div class="stat-grid">
-    <div class="stat"><div class="val mono">${fmtMoney(total,trip.baseCurrency||'INR')}</div><div class="lbl">total spend</div></div>
-    ${dailyAvgHTML||`<div class="stat"><div class="val mono">${expenses.length}</div><div class="lbl">entries logged</div></div>`}
-  </div>`;
+  let html;
+  if(currencies.length<=1){
+    const cur=currencies[0]||trip.baseCurrency||'INR';
+    const total=totals[cur]||0;
+    const dailyAvgHTML = days
+      ? `<div class="stat"><div class="val mono">${fmtMoney(total/days,cur)}</div><div class="lbl">daily average</div></div>`
+      : `<div class="stat"><div class="val mono">${expenses.length}</div><div class="lbl">entries logged</div></div>`;
+    html=`<div class="stat-grid">
+      <div class="stat"><div class="val mono">${fmtMoney(total,cur)}</div><div class="lbl">total spend</div></div>
+      ${dailyAvgHTML}
+    </div>`;
+  } else {
+    html=`<div class="board" style="padding:14px;margin-bottom:20px;">
+      <div class="board-head" style="padding:0 0 10px;border:none;">Total spend — ${currencies.length} currencies</div>
+      ${currencies.map(c=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-top:1px solid var(--line);">
+        <span style="font-weight:600;">${c}</span>
+        <span style="text-align:right;">
+          <span class="mono" style="font-weight:700;color:var(--flap);display:block;">${fmtMoney(totals[c],c)}</span>
+          ${days?`<span class="t2" style="margin:0;">${fmtMoney(totals[c]/days,c)}/day</span>`:''}
+        </span>
+      </div>`).join('')}
+    </div>`;
+  }
   if(expenses.length===0) return html+`<div class="board"><div class="empty">No expenses logged yet.</div></div>`;
   expenses.forEach(e=>{
     html+=`<div class="row" onclick="openExpenseForm('${trip.id}','${e.id}')" style="cursor:pointer;">
@@ -674,7 +865,6 @@ function activityRowHTML(a){
     if(a.airline) extra+=`${a.from||a.to?' · ':''}${esc(a.airline)}`;
     if(a.pnr) extra+=` · PNR ${esc(a.pnr)}`;
     extra+=`</div>`;
-    if(a.ticketFile) extra+=`<span class="file-link" onclick="viewFile('activities','${a.id}','ticketFile')">${ICONS.file} view ticket</span>`;
   }
   if(a.type==='train' && (a.from||a.to||a.trainNumber||a.seatNumbers)){
     extra+=`<div class="t2">`;
@@ -682,10 +872,12 @@ function activityRowHTML(a){
     if(a.trainNumber) extra+=`${a.from||a.to?' · ':''}#${esc(a.trainNumber)}`;
     if(a.seatNumbers) extra+=` · Seat ${esc(a.seatNumbers)}`;
     extra+=`</div>`;
-    if(a.ticketFile) extra+=`<span class="file-link" onclick="viewFile('activities','${a.id}','ticketFile')">${ICONS.file} view ticket</span>`;
   }
   if(a.type==='stay' && a.location){
     extra+=`<div class="t2"><span class="map-link" onclick="openMaps('${esc(a.location).replace(/'/g,"\\'")}')">${ICONS.mapPin}${esc(a.location)}</span></div>`;
+  }
+  if(a.ticketFile){
+    extra+=`<span class="file-link" onclick="viewFile('activities','${a.id}','ticketFile')">${ICONS.file} view ${a.type==='stay'?'confirmation':'ticket'}</span>`;
   }
   return `<div class="row" onclick="openActivityForm('${a.tripId}','${a.id}')" style="cursor:pointer;">
     <div class="rmain">
@@ -754,16 +946,18 @@ function closeSheet(){
   pendingActivityFile=null;
 }
 
-/* ---- Create trip ---- */
+/* ---- Create / edit trip ---- */
 let pickedSingle={};
 function pickSingle(groupId,val){
   pickedSingle[groupId]=val;
   document.querySelectorAll('#'+groupId+' .chip').forEach(c=>c.classList.toggle('active',c.dataset.v===val));
 }
-function openTripForm(){
+async function openTripForm(tripId){
+  const editing=tripId?await idGet('trips',tripId):null;
+  const src=editing||{};
   openSheet(`
-    <h3>New trip</h3>
-    <div class="field"><label>Destination</label><input id="f-dest" placeholder="e.g. Lisbon &amp; Porto"></div>
+    <h3>${editing?'Edit trip':'New trip'}</h3>
+    <div class="field"><label>Destination</label><input id="f-dest" placeholder="e.g. Lisbon &amp; Porto" value="${esc(src.destination||'')}"></div>
     <div class="field"><label>Trip type</label>
       <div class="chip-select" id="f-type">
         <span class="chip" data-v="domestic" onclick="pickSingle('f-type','domestic')">Domestic</span>
@@ -771,21 +965,21 @@ function openTripForm(){
       </div>
     </div>
     <label class="tentative-toggle">
-      <input type="checkbox" id="f-tentative" onchange="document.getElementById('f-dates-wrap').classList.toggle('hidden',this.checked)">
+      <input type="checkbox" id="f-tentative" ${src.tentative?'checked':''} onchange="document.getElementById('f-dates-wrap').classList.toggle('hidden',this.checked)">
       <span class="txt">Dates not fixed yet — mark this trip as <strong>tentative</strong> for now</span>
     </label>
-    <div class="field-row dates-wrap" id="f-dates-wrap">
-      <div class="field"><label>Start date</label><input id="f-start" type="date"></div>
-      <div class="field"><label>End date</label><input id="f-end" type="date"></div>
+    <div class="field-row dates-wrap ${src.tentative?'hidden':''}" id="f-dates-wrap">
+      <div class="field"><label>Start date</label><input id="f-start" type="date" value="${src.startDate||''}"></div>
+      <div class="field"><label>End date</label><input id="f-end" type="date" value="${src.endDate||''}"></div>
     </div>
-    <div class="field"><label>Base currency</label><input id="f-cur" placeholder="e.g. INR" value="INR" style="text-transform:uppercase"></div>
+    <div class="field"><label>Base currency</label><input id="f-cur" placeholder="e.g. INR" value="${esc(src.baseCurrency||'INR')}" style="text-transform:uppercase"></div>
     <div class="sheet-actions">
-      <button class="btn ghost" onclick="closeSheet()">Cancel</button>
-      <button class="btn primary" onclick="saveTrip()">Create trip</button>
+      ${editing?`<button class="btn ghost" style="color:var(--rose);border-color:var(--rose);" onclick="confirmDeleteTrip('${tripId}')">Delete trip</button>`:`<button class="btn ghost" onclick="closeSheet()">Cancel</button>`}
+      <button class="btn primary" onclick="saveTrip('${tripId||''}')">${editing?'Save changes':'Create trip'}</button>
     </div>`);
-  pickSingle('f-type','domestic');
+  pickSingle('f-type',src.tripType||'domestic');
 }
-async function saveTrip(){
+async function saveTrip(tripId){
   const destination=document.getElementById('f-dest').value.trim();
   const tripType=pickedSingle['f-type']||'domestic';
   const tentative=document.getElementById('f-tentative').checked;
@@ -794,22 +988,50 @@ async function saveTrip(){
   const cur=document.getElementById('f-cur').value.trim().toUpperCase()||'INR';
   if(!destination){toast('Add a destination first');return;}
   if(!tentative && !start){toast('Add a start date, or mark as tentative');return;}
+  const existing=tripId?await idGet('trips',tripId):null;
   const trip={
-    id:uid(),destination,tripType,
+    id:tripId||uid(),destination,tripType,
     tentative: tentative || !start,
     startDate: tentative?'':start,
     endDate: tentative?'':end,
     baseCurrency:cur,
-    createdAt:new Date().toISOString()
+    createdAt:existing?existing.createdAt:new Date().toISOString()
   };
   await idPut('trips',trip);
-  if(tripType==='international'){
-    await idPut('tasks',{id:uid(),tripId:trip.id,title:'Upload passport copy',note:'Required for international travel',done:false,vault:true,required:true,trackExpiry:true});
-    await idPut('tasks',{id:uid(),tripId:trip.id,title:'Upload visa copy',note:'Required for international travel',done:false,vault:true,required:true});
+  if(!existing){
+    if(tripType==='international'){
+      await idPut('tasks',{id:uid(),tripId:trip.id,title:'Upload passport copy',note:'Required for international travel',done:false,vault:true,required:true,trackExpiry:true});
+      await idPut('tasks',{id:uid(),tripId:trip.id,title:'Upload visa copy',note:'Required for international travel',done:false,vault:true,required:true});
+    }
+    await idPut('tasks',{id:uid(),tripId:trip.id,title:'Upload travel insurance',note:'Suggested — remove if not needed',done:false,vault:true,required:false});
   }
-  await idPut('tasks',{id:uid(),tripId:trip.id,title:'Upload travel insurance',note:'Suggested — remove if not needed',done:false,vault:true,required:false});
-  pickedSingle={}; closeSheet(); toast('Trip created');
-  nav({view:'trip',id:trip.id,tab:'tasks'});
+  pickedSingle={}; closeSheet(); toast(existing?'Trip updated':'Trip created');
+  nav({view:'trip',id:trip.id,tab:existing?(route.tab||'tasks'):'tasks'});
+}
+function confirmDeleteTrip(tripId){
+  openSheet(`
+    <h3>Delete this trip?</h3>
+    <div class="field" style="color:var(--muted);font-size:13.5px;line-height:1.6;">
+      This permanently deletes the trip and everything in it — tasks, packing list, expenses, activities, and any attached files. This can't be undone.
+    </div>
+    <div class="sheet-actions">
+      <button class="btn ghost" onclick="openTripForm('${tripId}')">Cancel</button>
+      <button class="btn primary" style="background:var(--rose);" onclick="deleteTrip('${tripId}')">Delete permanently</button>
+    </div>`);
+}
+async function deleteTrip(tripId){
+  const [tasks,packing,expenses,activities]=await Promise.all([
+    idAll('tasks',tripId), idAll('packing',tripId), idAll('expenses',tripId), idAll('activities',tripId)
+  ]);
+  await Promise.all([
+    ...tasks.map(t=>idDel('tasks',t.id)),
+    ...packing.map(p=>idDel('packing',p.id)),
+    ...expenses.map(e=>idDel('expenses',e.id)),
+    ...activities.map(a=>idDel('activities',a.id))
+  ]);
+  await idDel('trips',tripId);
+  closeSheet(); toast('Trip deleted');
+  nav({view:'home'});
 }
 
 /* ---- add-item router per tab ---- */
@@ -976,6 +1198,12 @@ async function openActivityForm(tripId,activityId){
   const src=editing||{};
   openSheet(`
     <h3>${editing?'Edit activity':'Add activity'}</h3>
+    <div class="field">
+      <label>${ICONS.file} Attach ticket / confirmation <span style="color:var(--muted)">(PDF auto-fills the fields below)</span></label>
+      ${src.ticketFile?`<div class="t2" style="margin-bottom:6px;">Current: <span class="file-link" onclick="viewFile('activities','${activityId}','ticketFile')">${ICONS.file} view file</span> — choose a new file below to replace it</div>`:''}
+      <input type="file" accept="application/pdf,image/*" onchange="handleActivityFileAttach(this.files[0])">
+      <div id="attach-status" class="t2" style="margin-top:6px;color:var(--flap);font-weight:600;"></div>
+    </div>
     <div class="field"><label>Type</label>
       <div class="chip-select" id="f-type">
         ${ACT_TYPES.map(t=>`<span class="chip" data-v="${t}" onclick="pickSingle('f-type','${t}');onActivityTypeChange('${t}')">${t}</span>`).join('')}
@@ -996,10 +1224,6 @@ async function openActivityForm(tripId,activityId){
         <div class="field"><label>From</label><input id="f-from" placeholder="e.g. BOM" value="${src.type==='flight'?esc(src.from||''):''}"></div>
         <div class="field"><label>To</label><input id="f-to" placeholder="e.g. LIS" value="${src.type==='flight'?esc(src.to||''):''}"></div>
       </div>
-      <div class="field"><label>Ticket PDF <span style="color:var(--muted)">(optional)</span></label>
-        ${src.ticketFile?`<div class="t2" style="margin-bottom:6px;">Current: <span class="file-link" onclick="viewFile('activities','${activityId}','ticketFile')">${ICONS.file} view ticket</span> — choose a file below to replace it</div>`:''}
-        <input type="file" accept="application/pdf,image/*" onchange="pendingActivityFile=this.files[0]">
-      </div>
     </div>
 
     <div id="train-fields" class="hidden">
@@ -1010,10 +1234,6 @@ async function openActivityForm(tripId,activityId){
       <div class="field-row">
         <div class="field"><label>Train number</label><input id="f-train-num" placeholder="e.g. 12123" value="${esc(src.trainNumber||'')}"></div>
         <div class="field"><label>Seat number(s)</label><input id="f-train-seat" placeholder="e.g. B4 22,23" value="${esc(src.seatNumbers||'')}"></div>
-      </div>
-      <div class="field"><label>Ticket PDF / photo <span style="color:var(--muted)">(optional)</span></label>
-        ${src.ticketFile?`<div class="t2" style="margin-bottom:6px;">Current: <span class="file-link" onclick="viewFile('activities','${activityId}','ticketFile')">${ICONS.file} view ticket</span> — choose a file below to replace it</div>`:''}
-        <input type="file" accept="application/pdf,image/*" onchange="pendingActivityFile=this.files[0]">
       </div>
     </div>
 
@@ -1044,20 +1264,19 @@ async function saveActivity(tripId,activityId){
   if(!title){toast('Give it a title');return;}
   const existing=activityId?await idGet('activities',activityId):null;
   const activity={id:activityId||uid(),tripId,type,title,date,time,notes};
-  if(existing&&existing.ticketFile&&!pendingActivityFile&&(type==='flight'||type==='train')) activity.ticketFile=existing.ticketFile;
+  if(pendingActivityFile) activity.ticketFile=pendingActivityFile;
+  else if(existing&&existing.ticketFile) activity.ticketFile=existing.ticketFile;
   if(type==='flight'){
     activity.airline=document.getElementById('f-airline').value.trim();
     activity.pnr=document.getElementById('f-pnr').value.trim();
     activity.from=document.getElementById('f-from').value.trim();
     activity.to=document.getElementById('f-to').value.trim();
-    if(pendingActivityFile) activity.ticketFile=pendingActivityFile;
   }
   if(type==='train'){
     activity.from=document.getElementById('f-train-from').value.trim();
     activity.to=document.getElementById('f-train-to').value.trim();
     activity.trainNumber=document.getElementById('f-train-num').value.trim();
     activity.seatNumbers=document.getElementById('f-train-seat').value.trim();
-    if(pendingActivityFile) activity.ticketFile=pendingActivityFile;
   }
   if(type==='stay'){
     activity.location=document.getElementById('f-location').value.trim();
