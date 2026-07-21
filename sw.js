@@ -1,4 +1,4 @@
-const CACHE = 'compass-v14';
+const CACHE = 'compass-v18';
 const ASSETS = ['./', './index.html', './manifest.json', './icon.svg', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
