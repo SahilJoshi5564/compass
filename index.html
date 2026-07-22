@@ -309,7 +309,7 @@ h2.section-title .add{color:var(--flap);font-size:11px;letter-spacing:0.3px;text
    ============================================================ */
 
 /* ---------------- DB layer ---------------- */
-const DB_NAME='waypoint-db', DB_VERSION=3;
+const DB_NAME='waypoint-db', DB_VERSION=4;
 let db;
 function openDB(){
   return new Promise((resolve,reject)=>{
@@ -322,6 +322,7 @@ function openDB(){
       if(!d.objectStoreNames.contains('expenses')) d.createObjectStore('expenses',{keyPath:'id'}).createIndex('tripId','tripId');
       if(!d.objectStoreNames.contains('activities')) d.createObjectStore('activities',{keyPath:'id'}).createIndex('tripId','tripId');
       if(!d.objectStoreNames.contains('meta')) d.createObjectStore('meta',{keyPath:'key'});
+      if(!d.objectStoreNames.contains('personalTemplates')) d.createObjectStore('personalTemplates',{keyPath:'id'});
     };
     req.onsuccess=e=>{db=e.target.result;resolve(db);};
     req.onerror=e=>reject(e);
@@ -361,18 +362,50 @@ const ICONS={
 
 /* ---------------- helpers ---------------- */
 const CATS=['stay','food','transport','activities','shopping','client','comms','other'];
+const BUSINESS_ONLY_CATS=['client','comms'];
 const ACT_TYPES=['flight','train','stay','activity','transport','other'];
+const TRANSPORT_MODES=['Bus','Ferry','Car/Taxi','Metro/Transit','Other'];
 const PACKING_TEMPLATES={
-  'City trip':['Passport + copies','Adapter','Walking shoes','Daypack','Toiletries kit','Power bank','Phone charger'],
-  'Backpacking':['Backpack rain cover','Quick-dry towel','Reusable water bottle','First aid kit','Headlamp','Packing cubes','Sleeping bag liner'],
-  'Work trip':['Laptop + charger','Formal wear','Business cards','Notebook','Extra chargers/adapters','ID badge'],
-  'Beach':['Swimwear','Sunscreen','Sunglasses','Flip-flops','Beach towel','Hat']
+  'City trip':[
+    {title:'Adapter',intlOnly:true},
+    {title:'Walking shoes'},{title:'Daypack'},{title:'Toiletries kit'},{title:'Power bank'},{title:'Phone charger'}
+  ],
+  'Backpacking':[
+    {title:'Backpack rain cover'},{title:'Quick-dry towel'},{title:'Reusable water bottle'},
+    {title:'First aid kit'},{title:'Headlamp'},{title:'Packing cubes'},{title:'Sleeping bag liner'}
+  ],
+  'Work trip':[
+    {title:'Laptop + charger'},{title:'Formal wear'},{title:'Business cards'},{title:'Notebook'},
+    {title:'Extra chargers'},{title:'Plug adapter',intlOnly:true},{title:'ID badge'}
+  ],
+  'Beach':[
+    {title:'Swimwear'},{title:'Sunscreen'},{title:'Sunglasses'},{title:'Flip-flops'},{title:'Beach towel'},{title:'Hat'}
+  ]
 };
 const TASK_TEMPLATES={
-  'City trip':[{title:'Check in online',dueOffsetDays:1},{title:'Download offline maps',dueOffsetDays:2},{title:'Notify bank of travel',dueOffsetDays:3},{title:'Save hotel address offline',dueOffsetDays:1}],
-  'International':[{title:'Check visa requirements',dueOffsetDays:45},{title:'Get local SIM / eSIM',dueOffsetDays:3},{title:'Exchange currency',dueOffsetDays:5},{title:'Check passport validity (6+ months)',dueOffsetDays:60}],
-  'Business trip':[{title:'Confirm meeting itinerary',dueOffsetDays:7},{title:'Save boarding passes offline',dueOffsetDays:1},{title:'Pack chargers & adapters',dueOffsetDays:1},{title:'Set out-of-office reply',dueOffsetDays:1}],
-  'Beach / Leisure':[{title:'Book airport transfer',dueOffsetDays:7},{title:'Check sunscreen/liquid limits',dueOffsetDays:3},{title:'Arrange pet/house sitting',dueOffsetDays:7}]
+  'City trip':[
+    {title:'Check in online',dueOffsetDays:1},
+    {title:'Download offline maps',dueOffsetDays:2},
+    {title:'Notify bank of travel',dueOffsetDays:3,intlOnly:true},
+    {title:'Save hotel address offline',dueOffsetDays:1}
+  ],
+  'International':[
+    {title:'Check visa requirements',dueOffsetDays:45,intlOnly:true},
+    {title:'Get local SIM / eSIM',dueOffsetDays:3,intlOnly:true},
+    {title:'Exchange currency',dueOffsetDays:5,intlOnly:true}
+  ],
+  'Business trip':[
+    {title:'Confirm meeting itinerary',dueOffsetDays:7},
+    {title:'Save boarding passes offline',dueOffsetDays:1},
+    {title:'Pack chargers',dueOffsetDays:1},
+    {title:'Pack plug adapter',dueOffsetDays:1,intlOnly:true},
+    {title:'Set out-of-office reply',dueOffsetDays:1}
+  ],
+  'Beach / Leisure':[
+    {title:'Book airport transfer',dueOffsetDays:7},
+    {title:'Check sunscreen/liquid limits',dueOffsetDays:3},
+    {title:'Arrange pet/house sitting',dueOffsetDays:7}
+  ]
 };
 function fmtMoney(n,cur){return (cur||'')+' '+Number(n||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});}
 function fmtDate(d){if(!d)return'';const dt=new Date(d+'T00:00:00');return dt.toLocaleDateString(undefined,{month:'short',day:'numeric'});}
@@ -656,8 +689,31 @@ window.addEventListener('hashchange',()=>{
   render();
 });
 
+async function migratePassportTasks(){
+  const already=await idGet('meta','passportMigrated');
+  if(already) return;
+  const allTasks=await idAll('tasks');
+  const oldPassportTasks=allTasks.filter(t=>t.title==='Upload passport copy');
+  if(oldPassportTasks.length){
+    const existingProfile=await getPassportProfile();
+    if(!existingProfile){
+      const withFile=oldPassportTasks.find(t=>t.file)||oldPassportTasks[0];
+      if(withFile.file || withFile.expiryDate){
+        await idPut('meta',{key:'passport',file:withFile.file,expiryDate:withFile.expiryDate||''});
+      }
+    }
+    for(const t of oldPassportTasks) await idDel('tasks',t.id);
+  }
+  // old visa tasks were locked as required:true (undismissable even when not needed) — free them up
+  const oldVisaTasks=allTasks.filter(t=>t.title==='Upload visa copy' && t.required===true);
+  for(const t of oldVisaTasks){
+    await idPut('tasks',{...t,required:false,note:'Not all destinations require one — delete if it doesn\u2019t apply'});
+  }
+  await idPut('meta',{key:'passportMigrated',value:true});
+}
 async function init(){
   await openDB();
+  await migratePassportTasks();
   if(location.hash.length>1){
     try{route=JSON.parse(decodeURIComponent(location.hash.slice(1)));}catch(e){}
   }
@@ -673,7 +729,7 @@ async function render(){
 
 /* ================= HOME ================= */
 async function backupNudgeHTML(){
-  const [tasks,activities,expenses,meta]=await Promise.all([idAll('tasks'),idAll('activities'),idAll('expenses'),idGet('meta','lastExportAt')]);
+  const [tasks,activities,expenses,meta,templates]=await Promise.all([idAll('tasks'),idAll('activities'),idAll('expenses'),idGet('meta','lastExportAt'),idAll('personalTemplates')]);
   const docCount=tasks.filter(t=>t.file).length+activities.filter(a=>a.ticketFile).length+expenses.filter(e=>e.receipt).length;
   const last=meta?new Date(meta.value):null;
   const daysSince=last?Math.floor((Date.now()-last.getTime())/86400000):null;
@@ -684,7 +740,8 @@ async function backupNudgeHTML(){
     <span class="nudge-actions">
       <span class="nudge-link" onclick="exportData()">Back up</span>
       <label class="nudge-link">Restore<input type="file" accept=".json" style="display:none" onchange="importData(event)"></label>
-      <span class="nudge-link" onclick="openSyncForm()">Sync</span>
+      <span class="nudge-link" onclick="openPassportForm()">Passport</span>
+      ${templates.length?`<span class="nudge-link" onclick="openPersonalTemplatesForm()">Templates</span>`:''}
     </span>
   </div>`;
 }
@@ -739,7 +796,105 @@ function tripCardHTML(t){
 
 /* ================= TRIP VIEW ================= */
 const DINING_KEYWORDS=['restaurant','cafe','café','bistro','dinner','lunch','breakfast','brunch','kitchen','trattoria','osteria','eatery',' bar','tavern','diner'];
-function computeSuggestions(trip,tasks,packing,activities,expenses){
+/* ---------------- recurring-trip personal templates ---------------- */
+function destinationKey(s){ return (s||'').trim().toLowerCase(); }
+async function findMatchingTrips(destination){
+  const key=destinationKey(destination);
+  if(!key) return [];
+  const all=await idAll('trips');
+  return all.filter(t=>destinationKey(t.destination)===key);
+}
+async function getPersonalTemplateFor(destination){
+  const key=destinationKey(destination);
+  const all=await idAll('personalTemplates');
+  return all.find(t=>t.destinationKey===key)||null;
+}
+function intersectLists(lists){
+  const nonEmpty=lists.filter(l=>l.length);
+  if(!nonEmpty.length) return [];
+  if(nonEmpty.length===1) return nonEmpty[0];
+  return nonEmpty[0].filter(item=>nonEmpty.every(l=>l.includes(item)));
+}
+async function recurringTripSuggestion(trip){
+  if(!trip.destination) return null;
+  const matches=await findMatchingTrips(trip.destination);
+  if(matches.length<3) return null;
+  const existing=await getPersonalTemplateFor(trip.destination);
+  if(existing) return null;
+  const id='sugg-recurring-'+destinationKey(trip.destination).replace(/[^a-z0-9]/g,'');
+  if((trip.dismissedSuggestions||[]).includes(id)) return null;
+  return {id, icon:ICONS.bell, text:`You've logged "${esc(trip.destination)}" ${matches.length} times — save it as your own template for next time?`, action:`openSaveTemplateConfirm('${trip.id}')`};
+}
+async function openSaveTemplateConfirm(tripId){
+  const trip=await idGet('trips',tripId);
+  const matches=await findMatchingTrips(trip.destination);
+  openSheet(`
+    <h3>${ICONS.bell} Save as a personal template?</h3>
+    <div class="t2" style="margin-bottom:14px;line-height:1.6;">
+      Looks at your ${matches.length} "${esc(trip.destination)}" trips and saves whatever packing items and tasks show up every time — so next time you create this trip, we can pre-fill it for you.
+    </div>
+    <div class="sheet-actions">
+      <button class="btn ghost" onclick="dismissSuggestion('${tripId}','sugg-recurring-${destinationKey(trip.destination).replace(/[^a-z0-9]/g,'')}');closeSheet()">Not now</button>
+      <button class="btn primary" onclick="createPersonalTemplate('${tripId}')">Save template</button>
+    </div>`);
+}
+async function createPersonalTemplate(tripId){
+  const trip=await idGet('trips',tripId);
+  const matches=await findMatchingTrips(trip.destination);
+  const packingLists=await Promise.all(matches.map(t=>idAll('packing',t.id).then(items=>items.map(i=>i.title))));
+  const taskLists=await Promise.all(matches.map(t=>idAll('tasks',t.id).then(items=>items.filter(i=>!i.vault&&!i.required).map(i=>({title:i.title,dueOffsetDays:i.dueOffsetDays})))));
+  const packingItems=intersectLists(packingLists);
+  const taskTitles=intersectLists(taskLists.map(list=>list.map(t=>t.title)));
+  const taskItems=taskTitles.map(title=>{
+    const found=taskLists.flat().find(t=>t.title===title);
+    return {title,dueOffsetDays:found?found.dueOffsetDays:undefined};
+  });
+  const template={
+    id:uid(), destinationKey:destinationKey(trip.destination), destinationLabel:trip.destination,
+    tripType:trip.tripType, purpose:trip.purpose||'leisure', packingItems, taskItems,
+    createdAt:new Date().toISOString(), sourceCount:matches.length
+  };
+  await idPut('personalTemplates',template);
+  closeSheet(); toast('Template saved — it\u2019ll offer to fill this in next time'); render();
+}
+async function applyPersonalTemplate(tripId,templateId){
+  const template=await idGet('personalTemplates',templateId);
+  if(!template) return;
+  for(const title of template.packingItems){
+    await idPut('packing',{id:uid(),tripId,title,done:false});
+  }
+  for(const item of template.taskItems){
+    const task={id:uid(),tripId,title:item.title,note:'',done:false};
+    if(item.dueOffsetDays) task.dueOffsetDays=item.dueOffsetDays;
+    await idPut('tasks',task);
+  }
+  toast('Applied your saved template');
+  render();
+}
+async function deletePersonalTemplate(id){
+  await idDel('personalTemplates',id);
+  toast('Template removed'); render();
+}
+async function personalTemplatesListHTML(){
+  const all=await idAll('personalTemplates');
+  if(!all.length) return '<div class="empty">No personal templates yet — create the same trip 3 times and we\u2019ll offer to save one.</div>';
+  return all.map(t=>`<div class="check-row">
+    <div class="info"><div class="t1">${esc(t.destinationLabel)}</div>
+      <div class="t2">${t.packingItems.length} packing item${t.packingItems.length!==1?'s':''} · ${t.taskItems.length} task${t.taskItems.length!==1?'s':''} · from ${t.sourceCount} trips</div>
+    </div>
+    <button class="del" onclick="deletePersonalTemplate('${t.id}')">&times;</button>
+  </div>`).join('');
+}
+async function openPersonalTemplatesForm(){
+  openSheet(`
+    <h3>${ICONS.bell} Your trip templates</h3>
+    <div class="t2" style="margin-bottom:14px;">Auto-saved from trips you've logged 3+ times.</div>
+    <div class="board">${await personalTemplatesListHTML()}</div>
+    <div class="sheet-actions">
+      <button class="btn primary" onclick="closeSheet()">Done</button>
+    </div>`);
+}
+function computeSuggestions(trip,tasks,packing,activities,expenses,passportProfile){
   const out=[];
   const t=todayStr();
   const dismissed=new Set(trip.dismissedSuggestions||[]);
@@ -755,13 +910,13 @@ function computeSuggestions(trip,tasks,packing,activities,expenses){
     }
   });
 
-  // 2. Packing list still empty close to departure
-  if(daysToStart!==null && daysToStart>=0 && daysToStart<=3 && packing.length===0){
+  // 2. Packing list still empty close to departure (skip for quick trips — low-prep by definition)
+  if(!trip.quickTrip && daysToStart!==null && daysToStart>=0 && daysToStart<=3 && packing.length===0){
     push('sugg-packing-empty', ICONS.tasks, `${esc(trip.destination)} is ${daysToStart===0?'today':'in '+daysToStart+'d'} — packing list is still empty.`, 'tasks');
   }
 
-  // 3. Nothing planned close to departure
-  if(daysToStart!==null && daysToStart>=0 && daysToStart<=3 && activities.length===0){
+  // 3. Nothing planned close to departure (skip for quick trips)
+  if(!trip.quickTrip && daysToStart!==null && daysToStart>=0 && daysToStart<=3 && activities.length===0){
     push('sugg-noactivities', ICONS.activities, `Nothing logged yet for ${esc(trip.destination)} — starts ${daysToStart===0?'today':'in '+daysToStart+'d'}.`, 'activities');
   }
 
@@ -772,12 +927,12 @@ function computeSuggestions(trip,tasks,packing,activities,expenses){
     if(d<=0) push('sugg-task-'+x.id, ICONS.tasks, `"${esc(x.title)}" is ${d<0?'overdue':'due today'}.`, 'tasks');
   });
 
-  // 5. Passport expiring within 6 months of return
-  tasks.filter(x=>x.trackExpiry && x.expiryDate).forEach(x=>{
+  // 5. Passport expiring within 6 months of return (international trips only — passport is global now)
+  if(trip.tripType==='international' && passportProfile && passportProfile.expiryDate){
     const ref=trip.endDate||t;
-    const days=Math.round((new Date(x.expiryDate+'T00:00:00')-new Date(ref+'T00:00:00'))/86400000);
-    if(days<183) push('sugg-passport-'+trip.id, ICONS.file, `Passport valid until ${fmtDate(x.expiryDate)} — under 6 months past your return date.`, 'tasks');
-  });
+    const days=Math.round((new Date(passportProfile.expiryDate+'T00:00:00')-new Date(ref+'T00:00:00'))/86400000);
+    if(days<183) push('sugg-passport-'+trip.id, ICONS.file, `Passport valid until ${fmtDate(passportProfile.expiryDate)} — under 6 months past your return date.`, 'tasks');
+  }
 
   // 6. International trip with only one flight logged (likely missing the return leg)
   if(trip.tripType==='international' && (status==='planned'||status==='active')){
@@ -802,9 +957,10 @@ function suggestionsHTML(trip,suggestions){
   let html=`<div class="suggest-strip">
     <div class="sg-head">${ICONS.bell} For this trip</div>`;
   suggestions.forEach(s=>{
+    const onclick=s.action||`nav({view:'trip',id:'${trip.id}',tab:'${s.tab}'})`;
     html+=`<div class="sg-item">
       <span class="sg-ic">${s.icon}</span>
-      <span class="sg-text" onclick="nav({view:'trip',id:'${trip.id}',tab:'${s.tab}'})">${s.text}</span>
+      <span class="sg-text" onclick="${onclick}">${s.text}</span>
       <button class="sg-dismiss" onclick="event.stopPropagation();dismissSuggestion('${trip.id}','${s.id}')">&times;</button>
     </div>`;
   });
@@ -853,11 +1009,13 @@ async function renderTrip(tripId,tab){
   activities.forEach(a=>{ if(a.expenseId && expenseById[a.expenseId]) a._linkedExpense=expenseById[a.expenseId]; });
 
   let body='';
-  if(tab==='tasks') body=tasksTabHTML(trip,tasks,packing);
+  if(tab==='tasks') body=tasksTabHTML(trip,tasks,packing,(await passportCardHTML(trip))+(await visaCardHTML(trip)));
   else if(tab==='expenses') body=expensesTabHTML(trip,expenses);
   else if(tab==='activities') body=activitiesTabHTML(trip,activities);
 
-  const suggestions=computeSuggestions(trip,tasks,packing,activities,expenses);
+  const suggestions=computeSuggestions(trip,tasks,packing,activities,expenses,await getPassportProfile());
+  const recurring=await recurringTripSuggestion(trip);
+  if(recurring) suggestions.push(recurring);
 
   return `
   <header class="topbar">
@@ -896,10 +1054,37 @@ function taskDueBadge(t,trip){
   if(d<=3) return `<span class="due soon">${d===0?'today':d+'d left'}</span>`;
   return `<span class="due ok">${d}d left</span>`;
 }
-function tasksTabHTML(trip,tasks,packing){
+async function passportCardHTML(trip){
+  if(trip.tripType!=='international') return '';
+  const p=await getPassportProfile();
+  const refDate=trip.endDate||todayStr();
+  let statusBlock;
+  if(!p || (!p.file && !p.expiryDate)){
+    statusBlock=`<div class="t2">Not on file yet</div>`;
+  } else {
+    const validDays=p.expiryDate?Math.round((new Date(p.expiryDate+'T00:00:00')-new Date(refDate+'T00:00:00'))/86400000):null;
+    const fileLink=p.file?`<span class="file-link" onclick="viewFile('meta','passport','file')">${ICONS.file} view file</span>`:'';
+    if(p.expiryDate && validDays!==null && validDays<183){
+      statusBlock=`${fileLink}<div class="expiry-warn">${ICONS.file} expires ${fmtDate(p.expiryDate)} — under 6 months validity past your return date; some countries will refuse entry</div>`;
+    } else if(p.expiryDate){
+      statusBlock=`${fileLink}<div class="t2">Valid until ${fmtDate(p.expiryDate)}</div>`;
+    } else {
+      statusBlock=`${fileLink}<div class="t2">No expiry date on file</div>`;
+    }
+  }
+  return `<div class="board" style="margin-bottom:14px;">
+    <div class="check-row">
+      <div class="box" style="${p&&(p.file||p.expiryDate)?'background:var(--teal);border-color:var(--teal);':''}">${p&&(p.file||p.expiryDate)?'✓':''}</div>
+      <div class="info"><div class="t1">Passport<span class="req-badge">on file, not per-trip</span></div>${statusBlock}</div>
+      <span class="upload-chip" onclick="openPassportForm()">${p&&(p.file||p.expiryDate)?'Update':'Add'}</span>
+    </div>
+  </div>`;
+}
+function tasksTabHTML(trip,tasks,packing,passportHTML){
   const doneT=tasks.filter(t=>t.done).length;
   const doneP=packing.filter(p=>p.done).length;
   let html=`<h2 class="section-title">Pre-trip tasks <span class="add" onclick="openTaskAddChoice('${trip.id}')">+ add</span></h2>`;
+  html+=passportHTML||'';
   html+=`<div class="board">`;
   if(tasks.length===0){
     html+=`<div class="empty">No tasks yet — visa, insurance, SIM, that sort of thing.</div>`;
@@ -912,24 +1097,10 @@ function tasksTabHTML(trip,tasks,packing){
       return (a.done===b.done)?0:(a.done?1:-1);
     }).forEach(t=>{
       if(t.vault||t.required){
-        let expiryBlock='';
-        if(t.trackExpiry && t.done){
-          const refDate=trip.endDate||todayStr();
-          const validDays=t.expiryDate?Math.round((new Date(t.expiryDate+'T00:00:00')-new Date(refDate+'T00:00:00'))/86400000):null;
-          if(!t.expiryDate){
-            expiryBlock=`<div class="expiry-input"><label>Passport expiry date</label>
-              <input type="date" onchange="setTaskExpiry('${t.id}',this.value)"></div>`;
-          } else if(validDays!==null && validDays<183){
-            expiryBlock=`<div class="expiry-warn">${ICONS.file} expires ${fmtDate(t.expiryDate)} — under 6 months validity past your ${trip.endDate?'return date':'travel dates'}; some countries will refuse entry</div>`;
-          } else {
-            expiryBlock=`<div class="t2">Valid until ${fmtDate(t.expiryDate)}</div>`;
-          }
-        }
         html+=`<div class="check-row ${t.done?'done':''}">
           <div class="box">${t.done?'✓':''}</div>
           <div class="info"><div class="t1">${esc(t.title)}${t.required?'<span class="req-badge">required</span>':''}</div>
             <div class="t2">${t.done?`<span class="file-link" onclick="viewFile('tasks','${t.id}','file')">${ICONS.file} view file</span>`:'Tap upload to attach a copy'}</div>
-            ${expiryBlock}
           </div>
           <label class="upload-chip" for="file-${t.id}">${t.done?'Replace':'Upload'}</label>
           <input type="file" id="file-${t.id}" style="display:none" accept="application/pdf,image/*" onchange="handleTaskFile('${t.id}',this.files[0])">
@@ -1017,16 +1188,17 @@ function expensesTabHTML(trip,expenses){
 
 /* ---- Activities tab ---- */
 function routeTimelineHTML(activities){
-  const legs=activities.filter(a=>(a.type==='flight'||a.type==='train') && (a.from||a.to))
+  const legs=activities.filter(a=>(a.type==='flight'||a.type==='train'||a.type==='transport') && (a.from||a.to))
     .sort((a,b)=>(a.date||'').localeCompare(b.date||'')||(a.time||'').localeCompare(b.time||''));
   if(legs.length<2) return '';
   let html=`<h2 class="section-title">Route</h2><div class="route-board">`;
+  const legLabel=leg=>leg.type==='flight'?'Flight':leg.type==='train'?'Train':(leg.transportMode||'Transport');
   legs.forEach((leg,i)=>{
     html+=`<div class="route-leg">
       <div class="rail"><div class="dot"></div><div class="line"></div></div>
       <div class="rinfo">
         <div class="rcity">${esc(leg.from||'?')} → ${esc(leg.to||'?')}</div>
-        <div class="rmeta">${leg.type==='flight'?'Flight':'Train'}${leg.date?' · '+fmtDate(leg.date):''}${leg.time?' · '+esc(leg.time):''}${leg.type==='train'&&leg.trainNumber?' · #'+esc(leg.trainNumber):''}${leg.type==='flight'&&leg.airline?' · '+esc(leg.airline):''}</div>
+        <div class="rmeta">${legLabel(leg)}${leg.date?' · '+fmtDate(leg.date):''}${leg.time?' · '+esc(leg.time):''}${leg.type==='train'&&leg.trainNumber?' · #'+esc(leg.trainNumber):''}${leg.type==='flight'&&leg.airline?' · '+esc(leg.airline):''}</div>
       </div>
     </div>`;
   });
@@ -1059,6 +1231,13 @@ function activityRowHTML(a){
   }
   if(a.type==='stay' && a.location){
     extra+=`<div class="t2"><span class="map-link" onclick="openMaps('${esc(a.location).replace(/'/g,"\\'")}')">${ICONS.mapPin}${esc(a.location)}</span></div>`;
+  }
+  if(a.type==='transport' && (a.from||a.to||a.transportMode||a.bookingRef)){
+    extra+=`<div class="t2">`;
+    if(a.from||a.to) extra+=`<span class="flight-route">${esc(a.from||'?')} → ${esc(a.to||'?')}</span>`;
+    if(a.transportMode) extra+=`${a.from||a.to?' · ':''}${esc(a.transportMode)}`;
+    if(a.bookingRef) extra+=` · Ref ${esc(a.bookingRef)}`;
+    extra+=`</div>`;
   }
   if(a.ticketFile){
     extra+=`<span class="file-link" onclick="viewFile('activities','${a.id}','ticketFile')">${ICONS.file} view ${a.type==='stay'?'confirmation':'ticket'}</span>`;
@@ -1146,6 +1325,10 @@ function pickSingle(groupId,val){
   pickedSingle[groupId]=val;
   document.querySelectorAll('#'+groupId+' .chip').forEach(c=>c.classList.toggle('active',c.dataset.v===val));
 }
+function onTripTypeChange(type){
+  const wrap=document.getElementById('f-country-wrap');
+  if(wrap) wrap.classList.toggle('hidden',type!=='international');
+}
 async function openTripForm(tripId){
   const editing=tripId?await idGet('trips',tripId):null;
   const src=editing||{};
@@ -1154,8 +1337,21 @@ async function openTripForm(tripId){
     <div class="field"><label>Destination</label><input id="f-dest" placeholder="e.g. Lisbon &amp; Porto" value="${esc(src.destination||'')}"></div>
     <div class="field"><label>Trip type</label>
       <div class="chip-select" id="f-type">
-        <span class="chip" data-v="domestic" onclick="pickSingle('f-type','domestic')">Domestic</span>
-        <span class="chip" data-v="international" onclick="pickSingle('f-type','international')">International</span>
+        <span class="chip" data-v="domestic" onclick="pickSingle('f-type','domestic');onTripTypeChange('domestic')">Domestic</span>
+        <span class="chip" data-v="international" onclick="pickSingle('f-type','international');onTripTypeChange('international')">International</span>
+      </div>
+    </div>
+    <div class="field" id="f-country-wrap">
+      <label>Country <span style="color:var(--muted)">(for visa reference — optional)</span></label>
+      <select id="f-country" style="width:100%;background:var(--ink);border:1px solid var(--line);border-radius:8px;padding:10px 12px;color:var(--paper);font-size:14px;font-family:'Poppins',sans-serif;">
+        <option value="">Not listed / skip</option>
+        ${Object.keys(VISA_INFO).sort().map(c=>`<option value="${esc(c)}" ${src.destinationCountry===c?'selected':''}>${esc(c)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="field"><label>Purpose</label>
+      <div class="chip-select" id="f-purpose">
+        <span class="chip" data-v="leisure" onclick="pickSingle('f-purpose','leisure')">Leisure</span>
+        <span class="chip" data-v="business" onclick="pickSingle('f-purpose','business')">Business</span>
       </div>
     </div>
     <label class="tentative-toggle">
@@ -1167,30 +1363,34 @@ async function openTripForm(tripId){
       <div class="field"><label>End date</label><input id="f-end" type="date" value="${src.endDate||''}"></div>
     </div>
     <div class="field"><label>Base currency</label><input id="f-cur" placeholder="e.g. INR" value="${esc(src.baseCurrency||'INR')}" style="text-transform:uppercase"></div>
-    ${!editing?`<label class="tentative-toggle">
-      <input type="checkbox" id="f-quick">
-      <span class="txt">Quick trip — skip the suggested travel insurance task</span>
-    </label>`:''}
+    <label class="tentative-toggle">
+      <input type="checkbox" id="f-quick" ${src.quickTrip?'checked':''}>
+      <span class="txt">Quick trip — lighter checklist, skips the insurance suggestion and packing/activity nudges</span>
+    </label>
     <div class="sheet-actions">
       ${editing?`<button class="btn ghost" style="color:var(--rose);border-color:var(--rose);" onclick="confirmDeleteTrip('${tripId}')">Delete trip</button>`:`<button class="btn ghost" onclick="closeSheet()">Cancel</button>`}
       <button class="btn primary" onclick="saveTrip('${tripId||''}')">${editing?'Save changes':'Create trip'}</button>
     </div>`);
   pickSingle('f-type',src.tripType||'domestic');
+  pickSingle('f-purpose',src.purpose||'leisure');
+  onTripTypeChange(src.tripType||'domestic');
 }
 async function saveTrip(tripId){
   const destination=document.getElementById('f-dest').value.trim();
   const tripType=pickedSingle['f-type']||'domestic';
+  const purpose=pickedSingle['f-purpose']||'leisure';
+  const destinationCountry=tripType==='international'?(document.getElementById('f-country').value||''):'';
   const tentative=document.getElementById('f-tentative').checked;
   const start=document.getElementById('f-start').value;
   const end=document.getElementById('f-end').value;
   const cur=document.getElementById('f-cur').value.trim().toUpperCase()||'INR';
-  const skipInsurance=!tripId && document.getElementById('f-quick').checked;
+  const quickTrip=document.getElementById('f-quick').checked;
   if(!destination){toast('Add a destination first');return;}
   if(!tentative && !start){toast('Add a start date, or mark as tentative');return;}
   const existing=tripId?await idGet('trips',tripId):null;
   const wasInternational=existing&&existing.tripType==='international';
   const trip={
-    id:tripId||uid(),destination,tripType,
+    id:tripId||uid(),destination,tripType,purpose,destinationCountry,quickTrip,
     tentative: tentative || !start,
     startDate: tentative?'':start,
     endDate: tentative?'':end,
@@ -1198,28 +1398,31 @@ async function saveTrip(tripId){
     createdAt:existing?existing.createdAt:new Date().toISOString()
   };
   await idPut('trips',trip);
+  let appliedTemplate=false;
   if(!existing){
     if(tripType==='international'){
-      await idPut('tasks',{id:uid(),tripId:trip.id,title:'Upload passport copy',note:'Required for international travel',done:false,vault:true,required:true,trackExpiry:true});
-      await idPut('tasks',{id:uid(),tripId:trip.id,title:'Upload visa copy',note:'Required for international travel',done:false,vault:true,required:true});
+      await idPut('tasks',{id:uid(),tripId:trip.id,title:'Upload visa copy',note:'Not all destinations require one — delete if it doesn\u2019t apply',done:false,vault:true,required:false});
     }
-    if(!skipInsurance){
+    if(!quickTrip){
       await idPut('tasks',{id:uid(),tripId:trip.id,title:'Upload travel insurance',note:'Suggested — remove if not needed',done:false,vault:true,required:false});
     }
+    const matchingTemplate=await getPersonalTemplateFor(destination);
+    if(matchingTemplate){
+      await applyPersonalTemplate(trip.id,matchingTemplate.id);
+      appliedTemplate=true;
+    }
   } else if(tripType==='international' && !wasInternational){
-    // trip was edited from domestic to international — add the passport/visa tasks retroactively
-    // if they aren't already there (e.g. from an earlier international->domestic->international flip)
+    // trip was edited from domestic to international — add the visa task retroactively
+    // if it isn't already there (e.g. from an earlier international->domestic->international flip)
     const existingTasks=await idAll('tasks',trip.id);
-    const hasPassport=existingTasks.some(t=>t.title==='Upload passport copy');
     const hasVisa=existingTasks.some(t=>t.title==='Upload visa copy');
-    if(!hasPassport) await idPut('tasks',{id:uid(),tripId:trip.id,title:'Upload passport copy',note:'Required for international travel',done:false,vault:true,required:true,trackExpiry:true});
-    if(!hasVisa) await idPut('tasks',{id:uid(),tripId:trip.id,title:'Upload visa copy',note:'Required for international travel',done:false,vault:true,required:true});
-    toast('Trip updated — added passport/visa tasks');
+    if(!hasVisa) await idPut('tasks',{id:uid(),tripId:trip.id,title:'Upload visa copy',note:'Not all destinations require one — delete if it doesn\u2019t apply',done:false,vault:true,required:false});
+    toast('Trip updated — added a visa task');
     pickedSingle={}; closeSheet();
     nav({view:'trip',id:trip.id,tab:'tasks'});
     return;
   }
-  pickedSingle={}; closeSheet(); toast(existing?'Trip updated':'Trip created');
+  pickedSingle={}; closeSheet(); toast(existing?'Trip updated':(appliedTemplate?'Trip created — applied your saved template':'Trip created'));
   nav({view:'trip',id:trip.id,tab:existing?(route.tab||'tasks'):'tasks'});
 }
 function confirmDeleteTrip(tripId){
@@ -1280,12 +1483,157 @@ async function saveTask(tripId,taskId){
   await idPut('tasks',task);
   closeSheet(); toast(taskId?'Task updated':'Task added'); render();
 }
-async function setTaskExpiry(id,dateVal){
-  if(!dateVal)return;
-  const item=await idGet('tasks',id);
-  item.expiryDate=dateVal;
-  await idPut('tasks',item);
-  render();
+/* ---------------- visa reference (Indian passport holders) ----------------
+   INDICATIVE ONLY — a point-in-time snapshot, not a live or authoritative source.
+   Visa rules change often; always verify with the destination's embassy or an
+   official visa portal before booking. Not exhaustive. */
+const VISA_INFO={
+  'Nepal':{status:'visa-free'},
+  'Bhutan':{status:'visa-free',note:'entry permit required, arranged via a registered tour operator'},
+  'Maldives':{status:'voa',note:'free visa on arrival, typically 30–90 days'},
+  'Mauritius':{status:'voa'},
+  'Sri Lanka':{status:'evisa',note:'ETA required before arrival'},
+  'Thailand':{status:'voa'},
+  'Indonesia':{status:'voa'},
+  'Malaysia':{status:'evisa'},
+  'Singapore':{status:'evisa'},
+  'Vietnam':{status:'evisa'},
+  'Cambodia':{status:'evisa'},
+  'Laos':{status:'voa'},
+  'Philippines':{status:'visa-free',note:'up to 30 days'},
+  'Hong Kong':{status:'visa-free'},
+  'Macau':{status:'visa-free'},
+  'Kenya':{status:'evisa'},
+  'Jordan':{status:'voa',note:'via registered tour or group entry'},
+  'UAE':{status:'evisa',note:'visa on arrival if holding a valid US/UK/Schengen visa or green card'},
+  'Qatar':{status:'voa',note:'for eligible visa/green-card holders, otherwise e-visa'},
+  'Seychelles':{status:'visa-free',note:'tourist visit permit issued on arrival'},
+  'Georgia':{status:'visa-free'},
+  'Armenia':{status:'evisa'},
+  'Kazakhstan':{status:'evisa'},
+  'Fiji':{status:'visa-free'},
+  'Jamaica':{status:'visa-free',note:'conditions apply'},
+  'Turkey':{status:'evisa'},
+  'Egypt':{status:'evisa'},
+  'Morocco':{status:'visa-free'},
+  'South Africa':{status:'required'},
+  'Brazil':{status:'visa-free'},
+  'Mexico':{status:'required',note:'visa-free entry possible if holding a valid US visa — verify current rules'},
+  'Portugal':{status:'required',note:'Schengen visa'},
+  'France':{status:'required',note:'Schengen visa'},
+  'Germany':{status:'required',note:'Schengen visa'},
+  'Italy':{status:'required',note:'Schengen visa'},
+  'Spain':{status:'required',note:'Schengen visa'},
+  'Netherlands':{status:'required',note:'Schengen visa'},
+  'Greece':{status:'required',note:'Schengen visa'},
+  'Switzerland':{status:'required',note:'Schengen visa'},
+  'United Kingdom':{status:'required'},
+  'United States':{status:'required'},
+  'Canada':{status:'required',note:'an eTA may suffice if holding a valid US visa — verify current rules'},
+  'Australia':{status:'evisa',note:'ETA or eVisitor'},
+  'New Zealand':{status:'evisa',note:'NZeTA'},
+  'Japan':{status:'required'},
+  'South Korea':{status:'evisa',note:'K-ETA'},
+  'China':{status:'required'}
+};
+const VISA_STATUS_LABELS={'visa-free':'Visa-free','voa':'Visa on arrival','evisa':'e-Visa required','required':'Visa required (apply in advance)'};
+const VISA_STATUS_COLOR={'visa-free':'var(--teal)','voa':'var(--teal)','evisa':'var(--flap)','required':'var(--rose)'};
+const EXISTING_VISA_TYPES=['Schengen','US B1/B2 (10yr)','UK Standard Visitor (5yr)','Canada (10yr)','Australia (subclass 600)','Other multi-entry'];
+async function visaCardHTML(trip){
+  if(trip.tripType!=='international' || !trip.destinationCountry) return '';
+  const info=VISA_INFO[trip.destinationCountry];
+  const label=info?VISA_STATUS_LABELS[info.status]:'Not in our reference list';
+  const color=info?VISA_STATUS_COLOR[info.status]:'var(--muted)';
+  let heldNote='';
+  if(info && info.note){
+    const visasRec=await idGet('meta','existingVisas');
+    const held=(visasRec&&visasRec.value)||[];
+    const keywordMap={'Schengen':['schengen'],'US B1/B2 (10yr)':['us visa','united states visa'],'UK Standard Visitor (5yr)':['uk visa'],'Canada (10yr)':['canada'],'Australia (subclass 600)':['australia']};
+    const noteLower=info.note.toLowerCase();
+    for(const hv of held){
+      const keywords=keywordMap[hv.type]||[];
+      if(keywords.some(k=>noteLower.includes(k))){
+        heldNote=`<div class="t2" style="margin-top:6px;color:var(--teal);">You have a ${esc(hv.type)} visa on file${hv.expiryDate?', valid until '+fmtDate(hv.expiryDate):''} — check whether it applies to this trip.</div>`;
+        break;
+      }
+    }
+  }
+  return `<div class="board" style="margin-bottom:14px;padding:14px;">
+    <div style="display:flex;align-items:flex-start;gap:10px;">
+      <span style="color:${color};flex:none;margin-top:2px;">${ICONS.alertTriangle}</span>
+      <div>
+        <div class="t1">Visa for ${esc(trip.destinationCountry)} <span class="req-badge">indicative only*</span></div>
+        <div class="t2" style="font-weight:700;color:${color};margin-top:4px;">${esc(label)}${info&&info.note?' — '+esc(info.note):''}</div>
+        ${heldNote}
+        <div class="t2" style="margin-top:6px;">*Point-in-time reference, not authoritative — always verify with the destination's embassy or an official visa portal before booking. Rules change often and this list isn't exhaustive.</div>
+      </div>
+    </div>
+  </div>`;
+}
+async function getPassportProfile(){
+  return await idGet('meta','passport');
+}
+async function openPassportForm(){
+  const p=await getPassportProfile();
+  const visasRec=await idGet('meta','existingVisas');
+  const existingVisas=(visasRec&&visasRec.value)||[];
+  openSheet(`
+    <h3>${ICONS.file} Your passport</h3>
+    <div class="t2" style="margin-bottom:14px;line-height:1.6;">
+      Stored once, used across every international trip — no need to re-upload it each time you travel.
+    </div>
+    ${p&&p.file?`<div class="t2" style="margin-bottom:10px;">Current: <span class="file-link" onclick="viewFile('meta','passport','file')">${ICONS.file} view file</span> — choose a new file below to replace it</div>`:''}
+    <div class="field"><label>Passport scan / photo</label>
+      <input type="file" accept="application/pdf,image/*" onchange="pendingPassportFile=this.files[0]">
+    </div>
+    <div class="field"><label>Expiry date</label><input id="f-passport-expiry" type="date" value="${p&&p.expiryDate?p.expiryDate:''}"></div>
+    <div class="field"><label>Passport issued by <span style="color:var(--muted)">(nationality)</span></label>
+      <select id="f-passport-nationality" style="width:100%;background:var(--ink);border:1px solid var(--line);border-radius:8px;padding:10px 12px;color:var(--paper);font-size:14px;font-family:'Poppins',sans-serif;">
+        ${['India','Other'].map(n=>`<option value="${n}" ${(p&&p.nationality||'India')===n?'selected':''}>${n}</option>`).join('')}
+      </select>
+      <div class="t2" style="margin-top:6px;">The visa reference on each trip is built for Indian passport holders — set this to "Other" to hide it if it doesn't apply.</div>
+    </div>
+    <div class="field"><label>Long-validity visas you already hold <span style="color:var(--muted)">(optional)</span></label>
+      <div id="existing-visas-list">
+        ${EXISTING_VISA_TYPES.map(vt=>{
+          const held=existingVisas.find(v=>v.type===vt);
+          return `<label class="tpl-item"><input type="checkbox" class="visa-check" data-type="${esc(vt)}" ${held?'checked':''} onchange="document.getElementById('visa-expiry-${esc(vt).replace(/[^a-z0-9]/gi,'')}').classList.toggle('hidden',!this.checked)"> ${esc(vt)}</label>
+          <div class="field visa-expiry-wrap ${held?'':'hidden'}" id="visa-expiry-${esc(vt).replace(/[^a-z0-9]/gi,'')}" style="margin:4px 0 10px 30px;">
+            <input type="date" class="visa-expiry-input" data-type="${esc(vt)}" value="${held?held.expiryDate||'':''}" placeholder="Expiry date">
+          </div>`;
+        }).join('')}
+      </div>
+    </div>
+    <div class="sheet-actions">
+      ${p?`<button class="btn ghost" style="color:var(--rose);border-color:var(--rose);" onclick="clearPassportProfile()">Remove</button>`:`<button class="btn ghost" onclick="closeSheet()">Cancel</button>`}
+      <button class="btn primary" onclick="savePassportProfile()">Save</button>
+    </div>`);
+  pendingPassportFile=null;
+}
+let pendingPassportFile=null;
+async function savePassportProfile(){
+  const expiryDate=document.getElementById('f-passport-expiry').value;
+  const nationality=document.getElementById('f-passport-nationality').value;
+  const existing=await getPassportProfile();
+  const record={key:'passport',expiryDate:expiryDate||(existing&&existing.expiryDate)||'',nationality};
+  if(pendingPassportFile) record.file=pendingPassportFile;
+  else if(existing&&existing.file) record.file=existing.file;
+  await idPut('meta',record);
+
+  const checks=[...document.querySelectorAll('.visa-check:checked')];
+  const expiryInputs=[...document.querySelectorAll('.visa-expiry-input')];
+  const heldVisas=checks.map(cb=>{
+    const exp=expiryInputs.find(i=>i.dataset.type===cb.dataset.type);
+    return {type:cb.dataset.type,expiryDate:exp?exp.value:''};
+  });
+  await idPut('meta',{key:'existingVisas',value:heldVisas});
+
+  pendingPassportFile=null; closeSheet(); toast('Passport saved'); render();
+}
+async function clearPassportProfile(){
+  const existing=await getPassportProfile();
+  if(existing) await idDel('meta','passport');
+  closeSheet(); toast('Passport removed'); render();
 }
 function openTaskAddChoice(tripId){
   openSheet(`
@@ -1295,12 +1643,13 @@ function openTaskAddChoice(tripId){
       <button class="btn ghost" onclick="openTaskTemplateForm('${tripId}')">From a template</button>
     </div>`);
 }
-function openTaskTemplateForm(tripId){
+async function openTaskTemplateForm(tripId){
+  const trip=await idGet('trips',tripId);
   openSheet(`
     <h3>Use a task template</h3>
     <div class="field"><label>Choose a preset — untick anything you don't need</label>
       <div class="chip-select" id="f-tasktemplate">
-        ${Object.keys(TASK_TEMPLATES).map(name=>`<span class="chip" data-v="${esc(name)}" onclick="pickSingle('f-tasktemplate','${esc(name)}');showTaskTemplatePreview('${esc(name)}')">${esc(name)}</span>`).join('')}
+        ${Object.keys(TASK_TEMPLATES).map(name=>`<span class="chip" data-v="${esc(name)}" onclick="pickSingle('f-tasktemplate','${esc(name)}');showTaskTemplatePreview('${esc(name)}','${trip.tripType}')">${esc(name)}</span>`).join('')}
       </div>
     </div>
     <div id="task-template-preview"></div>
@@ -1309,12 +1658,13 @@ function openTaskTemplateForm(tripId){
       <button class="btn primary" onclick="applyTaskTemplate('${tripId}')">Add tasks</button>
     </div>`);
 }
-function showTaskTemplatePreview(name){
+function showTaskTemplatePreview(name,tripType){
   const items=TASK_TEMPLATES[name]||[];
   document.getElementById('task-template-preview').innerHTML=
-    `<div class="field">`+items.map(it=>
-      `<label class="tpl-item"><input type="checkbox" class="tpl-check-task" data-title="${esc(it.title)}" data-due="${it.dueOffsetDays||''}" checked> ${esc(it.title)}${it.dueOffsetDays?` <span style="color:var(--muted);">(${it.dueOffsetDays}d before)</span>`:''}</label>`
-    ).join('')+`</div>`;
+    `<div class="field">`+items.map(it=>{
+      const checked=!it.intlOnly||tripType==='international';
+      return `<label class="tpl-item"><input type="checkbox" class="tpl-check-task" data-title="${esc(it.title)}" data-due="${it.dueOffsetDays||''}" ${checked?'checked':''}> ${esc(it.title)}${it.dueOffsetDays?` <span style="color:var(--muted);">(${it.dueOffsetDays}d before)</span>`:''}${it.intlOnly?` <span style="color:var(--muted);">— international trips</span>`:''}</label>`;
+    }).join('')+`</div>`;
 }
 async function applyTaskTemplate(tripId){
   const name=pickedSingle['f-tasktemplate'];
@@ -1359,12 +1709,13 @@ function openPackingAddChoice(tripId){
 }
 
 /* ---- packing from template ---- */
-function openPackingTemplateForm(tripId){
+async function openPackingTemplateForm(tripId){
+  const trip=await idGet('trips',tripId);
   openSheet(`
     <h3>Use a packing template</h3>
     <div class="field"><label>Choose a preset — untick anything you don't need</label>
       <div class="chip-select" id="f-template">
-        ${Object.keys(PACKING_TEMPLATES).map(name=>`<span class="chip" data-v="${esc(name)}" onclick="pickSingle('f-template','${esc(name)}');showTemplatePreview('${esc(name)}')">${esc(name)}</span>`).join('')}
+        ${Object.keys(PACKING_TEMPLATES).map(name=>`<span class="chip" data-v="${esc(name)}" onclick="pickSingle('f-template','${esc(name)}');showTemplatePreview('${esc(name)}','${trip.tripType}')">${esc(name)}</span>`).join('')}
       </div>
     </div>
     <div id="template-preview"></div>
@@ -1373,12 +1724,13 @@ function openPackingTemplateForm(tripId){
       <button class="btn primary" onclick="applyPackingTemplate('${tripId}')">Add items</button>
     </div>`);
 }
-function showTemplatePreview(name){
+function showTemplatePreview(name,tripType){
   const items=PACKING_TEMPLATES[name]||[];
   document.getElementById('template-preview').innerHTML=
-    `<div class="field">`+items.map((title,i)=>
-      `<label class="tpl-item"><input type="checkbox" class="tpl-check" data-title="${esc(title)}" checked> ${esc(title)}</label>`
-    ).join('')+`</div>`;
+    `<div class="field">`+items.map(it=>{
+      const checked=!it.intlOnly||tripType==='international';
+      return `<label class="tpl-item"><input type="checkbox" class="tpl-check" data-title="${esc(it.title)}" ${checked?'checked':''}> ${esc(it.title)}${it.intlOnly?` <span style="color:var(--muted);">— international trips</span>`:''}</label>`;
+    }).join('')+`</div>`;
 }
 async function applyPackingTemplate(tripId){
   const name=pickedSingle['f-template'];
@@ -1412,8 +1764,12 @@ async function openExpenseForm(tripId,expenseId){
     </div>
     <div class="field"><label>Category</label>
       <div class="chip-select" id="f-cat">
-        ${CATS.map(c=>`<span class="chip" data-v="${c}" onclick="pickSingle('f-cat','${c}')">${catLabel(c)}</span>`).join('')}
+        ${CATS.filter(c=>trip.purpose==='business'||!BUSINESS_ONLY_CATS.includes(c)).map(c=>`<span class="chip" data-v="${c}" onclick="pickSingle('f-cat','${c}')">${catLabel(c)}</span>`).join('')}
       </div>
+      ${trip.purpose!=='business'?`<span class="add" style="display:inline-block;margin-top:8px;" onclick="document.getElementById('f-cat-more').classList.toggle('hidden');this.style.display='none';">+ more categories</span>
+      <div class="chip-select hidden" id="f-cat-more" style="margin-top:8px;">
+        ${CATS.filter(c=>BUSINESS_ONLY_CATS.includes(c)).map(c=>`<span class="chip" data-v="${c}" onclick="pickSingle('f-cat','${c}')">${catLabel(c)}</span>`).join('')}
+      </div>`:''}
     </div>
     <div class="field"><label>Date</label><input id="f-date" type="date" value="${src.date||todayStr()}"></div>
     <div class="field"><label>Note</label><input id="f-note" placeholder="optional" value="${esc(src.note||'')}"></div>
@@ -1457,6 +1813,7 @@ function onActivityTypeChange(type){
   document.getElementById('flight-fields').classList.toggle('hidden',type!=='flight');
   document.getElementById('train-fields').classList.toggle('hidden',type!=='train');
   document.getElementById('stay-fields').classList.toggle('hidden',type!=='stay');
+  document.getElementById('transport-fields').classList.toggle('hidden',type!=='transport');
   document.getElementById('generic-date-fields').classList.toggle('hidden',type==='stay');
 }
 async function openActivityForm(tripId,activityId){
@@ -1513,6 +1870,19 @@ async function openActivityForm(tripId,activityId){
       </div>
     </div>
 
+    <div id="transport-fields" class="hidden">
+      <div class="field"><label>Mode</label>
+        <div class="chip-select" id="f-transport-mode">
+          ${TRANSPORT_MODES.map(m=>`<span class="chip" data-v="${m}" onclick="pickSingle('f-transport-mode','${m}')">${m}</span>`).join('')}
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>From</label><input id="f-transport-from" placeholder="e.g. Hotel" value="${src.type==='transport'?esc(src.from||''):''}"></div>
+        <div class="field"><label>To</label><input id="f-transport-to" placeholder="e.g. Airport" value="${src.type==='transport'?esc(src.to||''):''}"></div>
+      </div>
+      <div class="field"><label>Booking reference <span style="color:var(--muted)">(optional)</span></label><input id="f-transport-ref" placeholder="e.g. confirmation code" value="${esc(src.bookingRef||'')}"></div>
+    </div>
+
     <div class="field-row">
       <div class="field"><label>Cost <span style="color:var(--muted)">(optional — logs to Expenses)</span></label><input id="f-cost-amount" type="number" step="0.01" placeholder="0.00" value="${linkedExpense?linkedExpense.amount:''}"></div>
       <div class="field"><label>Currency</label><input id="f-cost-currency" value="${esc((linkedExpense?linkedExpense.currency:trip.baseCurrency)||'INR')}" style="text-transform:uppercase"></div>
@@ -1527,6 +1897,7 @@ async function openActivityForm(tripId,activityId){
   const initialType=src.type||'activity';
   pickSingle('f-type',initialType);
   onActivityTypeChange(initialType);
+  if(src.type==='transport' && src.transportMode) pickSingle('f-transport-mode',src.transportMode);
 }
 function defaultCategoryForType(type){
   if(type==='flight'||type==='train'||type==='transport') return 'transport';
@@ -1563,6 +1934,12 @@ async function saveActivity(tripId,activityId){
     activity.checkOut=document.getElementById('f-checkout').value;
     if(activity.checkIn&&activity.checkOut&&activity.checkOut<activity.checkIn){toast('Check-out is before check-in');return;}
     if(!activity.date&&activity.checkIn) activity.date=activity.checkIn;
+  }
+  if(type==='transport'){
+    activity.transportMode=pickedSingle['f-transport-mode']||'Other';
+    activity.from=document.getElementById('f-transport-from').value.trim();
+    activity.to=document.getElementById('f-transport-to').value.trim();
+    activity.bookingRef=document.getElementById('f-transport-ref').value.trim();
   }
 
   // cost -> linked expense (create/update/unlink)
@@ -1784,8 +2161,8 @@ async function exportExpensesCSV(tripId){
   toast('CSV exported');
 }
 async function exportData(){
-  const [trips,tasksRaw,packing,expensesRaw,activitiesRaw]=await Promise.all([
-    idAll('trips'), idAll('tasks'), idAll('packing'), idAll('expenses'), idAll('activities')
+  const [trips,tasksRaw,packing,expensesRaw,activitiesRaw,personalTemplates]=await Promise.all([
+    idAll('trips'), idAll('tasks'), idAll('packing'), idAll('expenses'), idAll('activities'), idAll('personalTemplates')
   ]);
   const tasks=await Promise.all(tasksRaw.map(async t=>{
     if(t.file instanceof Blob){ return {...t, file:await fileToDataObj(t.file)}; }
@@ -1799,7 +2176,7 @@ async function exportData(){
     if(e.receipt instanceof Blob){ return {...e, receipt:await fileToDataObj(e.receipt)}; }
     return e;
   }));
-  const data={trips,tasks,packing,expenses,activities,exportedAt:new Date().toISOString()};
+  const data={trips,tasks,packing,expenses,activities,personalTemplates,exportedAt:new Date().toISOString()};
   const blob=new Blob([JSON.stringify(data)],{type:'application/json'});
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');
@@ -1828,6 +2205,7 @@ async function importData(ev){
       if(a.ticketFile && a.ticketFile.dataUrl) a.ticketFile=dataObjToFile(a.ticketFile);
       await idPut('activities',a);
     }
+    for(const t of data.personalTemplates||[]) await idPut('personalTemplates',t);
     toast('Backup restored'); render();
   }catch(e){toast('Invalid backup file');}
   ev.target.value='';
