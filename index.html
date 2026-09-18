@@ -55,6 +55,11 @@ header.topbar .brand{
 }
 header.topbar .brand .dot{width:9px;height:9px;background:var(--teal);border-radius:50%;}
 header.topbar .actions{display:flex;gap:8px;}
+.icon-btn{
+  background:none;border:1px solid var(--line);color:var(--muted);border-radius:9px;
+  width:36px;height:36px;display:flex;align-items:center;justify-content:center;
+}
+.icon-btn svg{display:block;}
 header.topbar button.icon-btn{
   background:none;border:1px solid var(--line);color:var(--muted);border-radius:9px;
   width:36px;height:36px;display:flex;align-items:center;justify-content:center;
@@ -186,6 +191,23 @@ h2.section-title .add{color:var(--flap);font-size:11px;letter-spacing:0.3px;text
 .tpl-item input{width:16px;height:16px;accent-color:var(--flap);flex:none;}
 
 /* suggestions module */
+/* quick-capture bar */
+.quick-capture-bar{display:flex;gap:8px;margin-bottom:14px;}
+.quick-capture-bar input{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:24px;padding:12px 16px;font-size:14px;color:var(--paper);font-family:'Poppins',sans-serif;}
+.quick-capture-bar input:focus{outline:none;border-color:var(--flap);}
+.qc-btn{flex:none;background:var(--flap);color:#FFFFFF;border:none;border-radius:24px;padding:0 22px;font-weight:700;font-size:14px;font-family:'Poppins',sans-serif;}
+
+/* notes-import parsed rows */
+.parsed-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line);}
+.parsed-row:last-child{border-bottom:none;}
+.parsed-row input[type=checkbox]{width:18px;height:18px;flex:none;accent-color:var(--flap);}
+.parsed-row .pr-main{flex:1;min-width:0;}
+.parsed-row .pr-note{font-size:13.5px;font-weight:600;color:var(--paper);}
+.parsed-row .pr-meta{font-size:11.5px;color:var(--muted);margin-top:2px;}
+.parsed-row .pr-amt{font-weight:700;color:var(--flap);font-variant-numeric:tabular-nums;flex:none;}
+.parsed-row.unparsed{opacity:.5;}
+.parsed-row.unparsed .pr-note{color:var(--rose);text-decoration:line-through;}
+
 .suggest-strip{background:var(--rust-soft);border:1px solid var(--rose);border-radius:var(--radius);padding:12px 14px;margin:14px 0 6px;}
 .suggest-strip .sg-head{display:flex;align-items:center;gap:7px;font-size:10.5px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--rose);margin-bottom:6px;}
 .sg-item{display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-top:1px solid rgba(193,115,74,.25);}
@@ -309,7 +331,7 @@ h2.section-title .add{color:var(--flap);font-size:11px;letter-spacing:0.3px;text
    ============================================================ */
 
 /* ---------------- DB layer ---------------- */
-const DB_NAME='waypoint-db', DB_VERSION=4;
+const DB_NAME='waypoint-db', DB_VERSION=5;
 let db;
 function openDB(){
   return new Promise((resolve,reject)=>{
@@ -323,6 +345,7 @@ function openDB(){
       if(!d.objectStoreNames.contains('activities')) d.createObjectStore('activities',{keyPath:'id'}).createIndex('tripId','tripId');
       if(!d.objectStoreNames.contains('meta')) d.createObjectStore('meta',{keyPath:'key'});
       if(!d.objectStoreNames.contains('personalTemplates')) d.createObjectStore('personalTemplates',{keyPath:'id'});
+      if(!d.objectStoreNames.contains('notes')) d.createObjectStore('notes',{keyPath:'id'}).createIndex('tripId','tripId');
     };
     req.onsuccess=e=>{db=e.target.result;resolve(db);};
     req.onerror=e=>reject(e);
@@ -414,7 +437,89 @@ function todayStr(){return new Date().toISOString().slice(0,10);}
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');clearTimeout(toast._h);toast._h=setTimeout(()=>t.classList.remove('show'),1800);}
 function esc(s){return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 const CAT_LABELS={client:'Client entertainment',comms:'Comms/internet'};
+const DOLLAR_CURRENCIES=['USD','SGD','AUD','CAD','HKD','NZD'];
+function resolveParsedCurrency(parsed,trip,lastUsedCurrency){
+  let currency=parsed.currency;
+  if(currency==='USD' && trip.baseCurrency!=='USD' && DOLLAR_CURRENCIES.includes(trip.baseCurrency)){
+    currency=trip.baseCurrency;
+  }
+  return currency||lastUsedCurrency||trip.baseCurrency||'INR';
+}
 function catLabel(c){if(!c)return'Other';return CAT_LABELS[c]||(c.charAt(0).toUpperCase()+c.slice(1));}
+
+/* ---------------- quick-expense parsing (shared by quick-capture bar + Notes import) ---------------- */
+const EXPENSE_CATEGORY_KEYWORDS={
+  transport:['taxi','cab','uber','ola','auto','rickshaw','metro','train','bus','fuel','petrol','diesel','parking','toll','flight','lga','jfk','airport'],
+  food:['lunch','dinner','breakfast','brunch','coffee','chai','tea','latte','snack','restaurant','cafe','food','drinks','beer','wine','bar'],
+  stay:['hotel','hostel','airbnb','resort','stay','room','lodge','homestay'],
+  shopping:['shopping','souvenir','gift','bought','store','mall','market','magnet','bracelet'],
+  activities:['ticket','entry','museum','tour','show','safari','trek','activity'],
+  comms:['sim','esim','data pack','wifi','roaming','recharge']
+};
+const CURRENCY_PATTERNS=[
+  {re:/S\$/i, code:'SGD'},
+  {re:/HK\$/i, code:'HKD'},
+  {re:/A\$/i, code:'AUD'},
+  {re:/C\$/i, code:'CAD'},
+  {re:/NZ\$/i, code:'NZD'},
+  {re:/₹|\bRs\.?\b|\bINR\b/i, code:'INR'},
+  {re:/€|\bEUR\b/i, code:'EUR'},
+  {re:/£|\bGBP\b/i, code:'GBP'},
+  {re:/¥|\bJPY\b/i, code:'JPY'},
+  {re:/\$|\bUSD\b/i, code:'USD'}
+];
+function parseQuickExpenseLine(line){
+  const trimmed=(line||'').trim();
+  if(!trimmed) return null;
+  let currency=null;
+  let working=trimmed;
+  for(const cp of CURRENCY_PATTERNS){
+    const cm=working.match(cp.re);
+    if(cm){ currency=cp.code; working=working.slice(0,cm.index)+working.slice(cm.index+cm[0].length); break; }
+  }
+  const m=working.match(/(\d+(?:[.,]\d+)?|\.\d+)/);
+  if(!m) return null;
+  const amount=parseFloat(m[1].replace(/,/g,''));
+  if(!amount || isNaN(amount)) return null;
+  let note=(working.slice(0,m.index)+working.slice(m.index+m[0].length)).trim();
+  note=note.replace(/^[-:,.\s]+|[-:,.\s]+$/g,'');
+  if(!note) note='Expense';
+  const noteLower=note.toLowerCase();
+  let category='other';
+  for(const cat in EXPENSE_CATEGORY_KEYWORDS){
+    if(EXPENSE_CATEGORY_KEYWORDS[cat].some(k=>noteLower.includes(k))){ category=cat; break; }
+  }
+  return {amount,note,category,currency};
+}
+/* ---- multi-expense-per-line parsing, for Notes exports like:
+     "08 August - $3 to LGA + $7.6 Wendy's + $5.65 Buses"
+   handles a leading date header and "+"-separated items on one line ---- */
+function extractDateHeader(line){
+  const m=line.match(new RegExp('^(\\d{1,2})\\s+('+MONTH_RE+')[a-z]*\\b\\s*[-:]?\\s*','i'));
+  if(!m) return null;
+  const monNum=MONTHNUM[m[2].slice(0,3).toLowerCase()];
+  if(!monNum) return null;
+  const year=new Date().getFullYear();
+  return {date:year+'-'+String(monNum).padStart(2,'0')+'-'+m[1].padStart(2,'0'), rest:line.slice(m[0].length).trim()};
+}
+function parseNotesBlock(text){
+  const lines=(text||'').split('\n').map(l=>l.trim()).filter(Boolean);
+  const rows=[];
+  let currentDate='';
+  let i=0;
+  for(const line of lines){
+    const header=extractDateHeader(line);
+    let content=line;
+    if(header){ currentDate=header.date; content=header.rest; }
+    if(!content){ i++; continue; }
+    const segments=content.split('+').map(s=>s.trim()).filter(Boolean);
+    for(const seg of segments){
+      const parsed=parseQuickExpenseLine(seg);
+      rows.push({i:i++, raw:seg, parsed:parsed?{...parsed,date:currentDate}:null});
+    }
+  }
+  return rows;
+}
 function groupByCurrency(expenses){
   const map={};
   expenses.forEach(e=>{
@@ -999,11 +1104,76 @@ function todayStripHTML(trip,activities,expenses){
   html+=`</div>`;
   return html;
 }
+/* ---------------- quick notes (untriaged catch-all) ---------------- */
+function openQuickNoteForm(tripId){
+  openSheet(`
+    <h3>${ICONS.file} Quick note</h3>
+    <div class="t2" style="margin-bottom:14px;">Jot anything down now, sort it into an expense, task, or activity later.</div>
+    <div class="field"><textarea id="f-quicknote" style="min-height:90px;" placeholder="e.g. ask hotel about late checkout"></textarea></div>
+    <div class="sheet-actions">
+      <button class="btn ghost" onclick="closeSheet()">Cancel</button>
+      <button class="btn primary" onclick="saveQuickNote('${tripId}')">Save</button>
+    </div>`);
+  setTimeout(()=>{const el=document.getElementById('f-quicknote'); if(el) el.focus();},250);
+}
+async function saveQuickNote(tripId){
+  const text=(document.getElementById('f-quicknote').value||'').trim();
+  if(!text){toast('Type something first');return;}
+  await idPut('notes',{id:uid(),tripId,text,createdAt:new Date().toISOString()});
+  closeSheet(); toast('Saved — sort it later from the notes card'); render();
+}
+async function triageNoteToExpense(tripId,noteId){
+  const note=await idGet('notes',noteId);
+  if(!note) return;
+  const parsed=parseQuickExpenseLine(note.text);
+  if(!parsed){ toast('Couldn\u2019t find an amount in this note — edit it to include one, e.g. "350 taxi"'); return; }
+  const trip=await idGet('trips',tripId);
+  const all=await idAll('expenses',tripId);
+  const last=all.sort((a,b)=>(b.date||'').localeCompare(a.date||''))[0];
+  const currency=resolveParsedCurrency(parsed,trip,last?last.currency:'');
+  await idPut('expenses',{id:uid(),tripId,amount:parsed.amount,currency,date:todayStr(),note:parsed.note,category:parsed.category});
+  await idDel('notes',noteId);
+  toast(`Logged ${fmtMoney(parsed.amount,currency)} · ${catLabel(parsed.category)}`); render();
+}
+async function triageNoteToTask(tripId,noteId){
+  const note=await idGet('notes',noteId);
+  if(!note) return;
+  await idPut('tasks',{id:uid(),tripId,title:note.text,note:'',done:false});
+  await idDel('notes',noteId);
+  toast('Added as a task'); render();
+}
+async function triageNoteToActivity(tripId,noteId){
+  const note=await idGet('notes',noteId);
+  if(!note) return;
+  await idPut('activities',{id:uid(),tripId,type:'activity',title:note.text,date:'',time:'',notes:''});
+  await idDel('notes',noteId);
+  toast('Added as an activity'); render();
+}
+async function deleteNote(noteId){
+  await idDel('notes',noteId);
+  toast('Deleted'); render();
+}
+function notesCardHTML(trip,notes){
+  if(!notes.length) return '';
+  return `<div class="board" style="margin-bottom:14px;">
+    <div class="board-head"><span>${ICONS.file} Quick notes</span><span>${notes.length}</span></div>
+    ${notes.map(n=>`<div class="check-row" style="align-items:flex-start;">
+      <div class="info"><div class="t1">${esc(n.text)}</div>
+        <div class="t2" style="margin-top:6px;display:flex;gap:10px;flex-wrap:wrap;">
+          <span class="file-link" onclick="triageNoteToExpense('${trip.id}','${n.id}')">${ICONS.expenses} expense</span>
+          <span class="file-link" onclick="triageNoteToTask('${trip.id}','${n.id}')">${ICONS.tasks} task</span>
+          <span class="file-link" onclick="triageNoteToActivity('${trip.id}','${n.id}')">${ICONS.activities} activity</span>
+        </div>
+      </div>
+      <button class="del" onclick="deleteNote('${n.id}')">&times;</button>
+    </div>`).join('')}
+  </div>`;
+}
 async function renderTrip(tripId,tab){
   const trip=await idGet('trips',tripId);
   if(!trip){nav({view:'home'});return '';}
-  const [tasks,packing,expenses,activities]=await Promise.all([
-    idAll('tasks',tripId), idAll('packing',tripId), idAll('expenses',tripId), idAll('activities',tripId)
+  const [tasks,packing,expenses,activities,notes]=await Promise.all([
+    idAll('tasks',tripId), idAll('packing',tripId), idAll('expenses',tripId), idAll('activities',tripId), idAll('notes',tripId)
   ]);
   const expenseById={}; expenses.forEach(e=>{expenseById[e.id]=e;});
   activities.forEach(a=>{ if(a.expenseId && expenseById[a.expenseId]) a._linkedExpense=expenseById[a.expenseId]; });
@@ -1022,10 +1192,14 @@ async function renderTrip(tripId,tab){
     <div class="backlink" onclick="nav({view:'home'})">${ICONS.chevronLeft}<span>Trips</span></div>
   </header>
   <main>
-    <div class="trip-hero" onclick="openTripForm('${trip.id}')" style="cursor:pointer;">
-      <div class="name">${esc(trip.destination)} <span class="hero-edit">${ICONS.edit}</span></div>
-      <div class="dates mono">${tripDateLabel(trip)} <span class="tag">${trip.tripType||'domestic'}</span></div>
+    <div class="trip-hero" style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+      <div onclick="openTripForm('${trip.id}')" style="cursor:pointer;flex:1;min-width:0;">
+        <div class="name">${esc(trip.destination)} <span class="hero-edit">${ICONS.edit}</span></div>
+        <div class="dates mono">${tripDateLabel(trip)} <span class="tag">${trip.tripType||'domestic'}</span></div>
+      </div>
+      <button class="icon-btn" style="flex:none;" onclick="openQuickNoteForm('${trip.id}')" title="Quick note">${ICONS.file}</button>
     </div>
+    ${notesCardHTML(trip,notes)}
     ${suggestionsHTML(trip,suggestions)}
     ${todayStripHTML(trip,activities,expenses)}
     ${body}
@@ -1146,7 +1320,12 @@ function expensesTabHTML(trip,expenses){
     const endRef = status==='active' ? todayStr() : trip.endDate||todayStr();
     days=Math.max(1,Math.round((new Date(endRef+'T00:00:00')-new Date(trip.startDate+'T00:00:00'))/86400000)+1);
   }
-  let html=`<div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
+  let html=`<div class="quick-capture-bar">
+    <input type="text" id="quick-expense-input" placeholder="e.g. 350 taxi" onkeydown="if(event.key==='Enter'){event.preventDefault();quickLogExpense('${trip.id}');}">
+    <button class="qc-btn" onclick="quickLogExpense('${trip.id}')">Log</button>
+  </div>
+  <div style="display:flex;justify-content:space-between;margin-bottom:10px;">
+    <span class="add" onclick="openNotesImportForm('${trip.id}')">${ICONS.file} Import from Notes</span>
     <span class="add" onclick="exportExpensesCSV('${trip.id}')">${ICONS.download} Export CSV</span>
   </div>`;
   if(currencies.length<=1){
@@ -1437,14 +1616,15 @@ function confirmDeleteTrip(tripId){
     </div>`);
 }
 async function deleteTrip(tripId){
-  const [tasks,packing,expenses,activities]=await Promise.all([
-    idAll('tasks',tripId), idAll('packing',tripId), idAll('expenses',tripId), idAll('activities',tripId)
+  const [tasks,packing,expenses,activities,notes]=await Promise.all([
+    idAll('tasks',tripId), idAll('packing',tripId), idAll('expenses',tripId), idAll('activities',tripId), idAll('notes',tripId)
   ]);
   await Promise.all([
     ...tasks.map(t=>idDel('tasks',t.id)),
     ...packing.map(p=>idDel('packing',p.id)),
     ...expenses.map(e=>idDel('expenses',e.id)),
-    ...activities.map(a=>idDel('activities',a.id))
+    ...activities.map(a=>idDel('activities',a.id)),
+    ...notes.map(n=>idDel('notes',n.id))
   ]);
   await idDel('trips',tripId);
   closeSheet(); toast('Trip deleted');
@@ -1743,7 +1923,89 @@ async function applyPackingTemplate(tripId){
   pickedSingle={}; closeSheet(); toast(checks.length+' items added'); render();
 }
 
+/* ---- import from Notes (bulk expense parsing) ---- */
+function openNotesImportForm(tripId){
+  openSheet(`
+    <h3>${ICONS.file} Import from Notes</h3>
+    <div class="t2" style="margin-bottom:14px;line-height:1.6;">
+      Paste text copied from your Notes app. Works with a simple "350 taxi" per line, or a whole day at once — "08 August - $3 taxi + $12 lunch + $8 coffee". Nothing gets added until you confirm.
+    </div>
+    <div class="field"><textarea id="f-notes-paste" style="min-height:120px;" placeholder="08 August - $3 taxi + $12 lunch + $8 coffee&#10;09 August - $5 bus + $10 souvenirs"></textarea></div>
+    <div class="sheet-actions">
+      <button class="btn ghost" onclick="closeSheet()">Cancel</button>
+      <button class="btn primary" onclick="previewNotesImport('${tripId}')">Parse</button>
+    </div>`);
+}
+function previewNotesImport(tripId){
+  const text=document.getElementById('f-notes-paste').value;
+  const parsedRows=parseNotesBlock(text);
+  if(!parsedRows.length){toast('Paste some text first');return;}
+  const parsedCount=parsedRows.filter(r=>r.parsed).length;
+  window._notesImportRows=parsedRows;
+  openSheet(`
+    <h3>${ICONS.file} Confirm import</h3>
+    <div class="t2" style="margin-bottom:12px;">${parsedCount} of ${parsedRows.length} item${parsedRows.length!==1?'s':''} parsed — untick anything you don't want to import.</div>
+    <div class="board" style="padding:4px 14px;">
+      ${parsedRows.map(r=>{
+        if(!r.parsed) return `<div class="parsed-row unparsed"><div class="pr-main"><div class="pr-note">${esc(r.raw)}</div><div class="pr-meta">no amount found — skipped</div></div></div>`;
+        return `<div class="parsed-row">
+          <input type="checkbox" class="notes-import-check" data-idx="${r.i}" checked>
+          <div class="pr-main"><div class="pr-note">${esc(r.parsed.note)}</div><div class="pr-meta">${catLabel(r.parsed.category)}${r.parsed.date?' · '+fmtDate(r.parsed.date):''}</div></div>
+          <div class="pr-amt">${fmtMoney(r.parsed.amount,r.parsed.currency||'')}</div>
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="sheet-actions">
+      <button class="btn ghost" onclick="openNotesImportForm('${tripId}')">Back</button>
+      <button class="btn primary" onclick="confirmNotesImport('${tripId}')">Import selected</button>
+    </div>`);
+}
+async function confirmNotesImport(tripId){
+  const rows=window._notesImportRows||[];
+  const checks=[...document.querySelectorAll('.notes-import-check:checked')].map(cb=>Number(cb.dataset.idx));
+  if(!checks.length){toast('Nothing selected');return;}
+  const trip=await idGet('trips',tripId);
+  const all=await idAll('expenses',tripId);
+  const last=all.sort((a,b)=>(b.date||'').localeCompare(a.date||''))[0];
+  let count=0;
+  for(const idx of checks){
+    const row=rows.find(r=>r.i===idx);
+    if(row&&row.parsed){
+      await idPut('expenses',{
+        id:uid(),tripId,amount:row.parsed.amount,
+        currency:resolveParsedCurrency(row.parsed,trip,last?last.currency:''),
+        date:row.parsed.date||todayStr(),
+        note:row.parsed.note,category:row.parsed.category
+      });
+      count++;
+    }
+  }
+  window._notesImportRows=null;
+  closeSheet(); toast(count+' expense'+(count!==1?'s':'')+' imported'); render();
+}
 /* ---- expense ---- */
+async function quickLogExpense(tripId){
+  const input=document.getElementById('quick-expense-input');
+  const text=(input&&input.value||'').trim();
+  if(!text){toast('Type an amount and what it was for');return;}
+  const parsed=parseQuickExpenseLine(text);
+  if(!parsed){
+    // couldn't find an amount — hand off to the full form with the text pre-filled as a note, so nothing typed is lost
+    if(input) input.value='';
+    await openExpenseForm(tripId);
+    setTimeout(()=>{const el=document.getElementById('f-note'); if(el) el.value=text;},260);
+    toast('Couldn\u2019t find an amount — add it here');
+    return;
+  }
+  const trip=await idGet('trips',tripId);
+  const all=await idAll('expenses',tripId);
+  const last=all.sort((a,b)=>(b.date||'').localeCompare(a.date||''))[0];
+  const currency=resolveParsedCurrency(parsed,trip,last?last.currency:'');
+  await idPut('expenses',{id:uid(),tripId,amount:parsed.amount,currency,date:todayStr(),note:parsed.note,category:parsed.category});
+  if(input) input.value='';
+  toast(`Logged ${fmtMoney(parsed.amount,currency)} · ${catLabel(parsed.category)}`);
+  render();
+}
 async function openExpenseForm(tripId,expenseId){
   const trip=await idGet('trips',tripId);
   const all=(await idAll('expenses',tripId)).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
@@ -2161,8 +2423,8 @@ async function exportExpensesCSV(tripId){
   toast('CSV exported');
 }
 async function exportData(){
-  const [trips,tasksRaw,packing,expensesRaw,activitiesRaw,personalTemplates]=await Promise.all([
-    idAll('trips'), idAll('tasks'), idAll('packing'), idAll('expenses'), idAll('activities'), idAll('personalTemplates')
+  const [trips,tasksRaw,packing,expensesRaw,activitiesRaw,personalTemplates,notes]=await Promise.all([
+    idAll('trips'), idAll('tasks'), idAll('packing'), idAll('expenses'), idAll('activities'), idAll('personalTemplates'), idAll('notes')
   ]);
   const tasks=await Promise.all(tasksRaw.map(async t=>{
     if(t.file instanceof Blob){ return {...t, file:await fileToDataObj(t.file)}; }
@@ -2176,7 +2438,7 @@ async function exportData(){
     if(e.receipt instanceof Blob){ return {...e, receipt:await fileToDataObj(e.receipt)}; }
     return e;
   }));
-  const data={trips,tasks,packing,expenses,activities,personalTemplates,exportedAt:new Date().toISOString()};
+  const data={trips,tasks,packing,expenses,activities,personalTemplates,notes,exportedAt:new Date().toISOString()};
   const blob=new Blob([JSON.stringify(data)],{type:'application/json'});
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');
@@ -2206,6 +2468,7 @@ async function importData(ev){
       await idPut('activities',a);
     }
     for(const t of data.personalTemplates||[]) await idPut('personalTemplates',t);
+    for(const n of data.notes||[]) await idPut('notes',n);
     toast('Backup restored'); render();
   }catch(e){toast('Invalid backup file');}
   ev.target.value='';
