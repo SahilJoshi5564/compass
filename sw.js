@@ -1,5 +1,5 @@
-const CACHE = 'compass-v25';
-const ASSETS = ['./', './index.html', './manifest.json', './icon.svg', './icon-192.png', './icon-512.png'];
+const CACHE = 'compass-v33';
+const ASSETS = ['./', './index.html', './manifest.json', './refdata.json', './raildata.json', './icon.svg', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(

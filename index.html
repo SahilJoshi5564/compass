@@ -367,6 +367,7 @@ function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2
 
 /* ---------------- icon set (simple outline, stroke=currentColor) ---------------- */
 const ICONS={
+  share:'<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>',
   tasks:'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6l2 2 4-4"/><path d="M11 6h10"/><path d="M3 14l2 2 4-4"/><path d="M11 14h10"/></svg>',
   expenses:'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="12" rx="2.5"/><path d="M3 10.5h18"/><circle cx="16.5" cy="14.5" r="1"/></svg>',
   activities:'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4"/><path d="M5 4h13l-3 4 3 4H5"/></svg>',
@@ -569,6 +570,36 @@ async function extractImageText(file,onProgress){
     await worker.terminate();
   }
 }
+/* ---------------- airline / airport reference data (OpenFlights, lazy-loaded) ---------------- */
+let REF=null, refPromise=null;
+function loadRefData(){
+  if(REF) return Promise.resolve(REF);
+  if(!refPromise) refPromise=fetch('refdata.json').then(r=>r.json()).then(d=>{REF=d;return d;}).catch(()=>{refPromise=null;return null;});
+  return refPromise;
+}
+function airportInfo(code){
+  if(!REF||!code) return null;
+  const c=String(code).toUpperCase(), a=REF.a[c];
+  return a?{code:c,city:a[0],country:REF.c[a[1]]}:null;
+}
+function airlineByCode(code){ return (REF&&code&&REF.l[String(code).toUpperCase()])||null; }
+function findFlightNumber(text){
+  if(!REF) return null;
+  let m=text.match(/\bFlight\s*(?:No\.?|Number|#)?\s*[:\-]?\s*([A-Z0-9]{2})\s?(\d{1,4})\b/i);
+  if(m && airlineByCode(m[1]) && /[A-Za-z]/.test(m[1])) return {code:m[1].toUpperCase(),num:m[2]};
+  const re=/(?<![A-Za-z0-9])([A-Z0-9]{2})\s?(\d{2,4})(?![A-Za-z0-9])/g;
+  const head=text.slice(0,3000);
+  while((m=re.exec(head))){
+    if(!/[A-Z]/.test(m[1])) continue;
+    if(/^(19|20)\d\d$/.test(m[2])) continue;
+    if(airlineByCode(m[1])) return {code:m[1],num:m[2]};
+  }
+  return null;
+}
+function routeLabel(a){
+  const side=(code,city)=>code?(city?city+' ('+code+')':code):'?';
+  return side(a.from,a.fromCity)+' → '+side(a.to,a.toCity);
+}
 const AIRLINES=['IndiGo','Air India Express','Air India','SpiceJet','Vistara','Go First','GoAir','AirAsia India','AirAsia','Akasa Air','TAP Air Portugal','TAP Portugal','Emirates','Qatar Airways','Etihad Airways','Etihad','Lufthansa','British Airways','Air France','KLM','Singapore Airlines','Thai Airways','American Airlines','United Airlines','Delta Air Lines','Delta','Turkish Airlines','Cathay Pacific','Malaysia Airlines','Qantas','ANA','Japan Airlines','Saudia','Oman Air','Sri Lankan Airlines','SriLankan'];
 function escapeRegex(s){ return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); }
 function guessAirline(text){
@@ -655,10 +686,157 @@ function guessTime(str){
   if(m[3]){const ap=m[3].toLowerCase();if(ap==='pm'&&h<12)h+=12;if(ap==='am'&&h===12)h=0;}
   return String(h).padStart(2,'0')+':'+m[2];
 }
+/* ---------------- Indian Railways: station + train database and IRCTC e-ticket parser ---------------- */
+let RAIL=null, railPromise=null, railNameIdx=null;
+function loadRailData(){
+  if(RAIL) return Promise.resolve(RAIL);
+  if(!railPromise) railPromise=fetch('raildata.json').then(r=>r.json()).then(d=>{
+    Object.assign(d.s,RAIL_STATION_PATCH); RAIL=d; railNameIdx=null; return d;
+  }).catch(()=>{railPromise=null;return null;});
+  return railPromise;
+}
+function loadBookingData(){ return Promise.all([loadRefData(),loadRailData()]); }
+// Stations renamed or added after the base dataset was published
+const RAIL_STATION_PATCH={
+  CSMT:['MUMBAI CSMT','Maharashtra'],MMCT:['MUMBAI CENTRAL','Maharashtra'],BDTS:['BANDRA TERMINUS','Maharashtra'],
+  PNVL:['PANVEL','Maharashtra'],TNA:['THANE','Maharashtra'],DDR:['DADAR CENTRAL','Maharashtra'],
+  ANVT:['ANAND VIHAR TERMINAL','Delhi'],NZM:['HAZRAT NIZAMUDDIN','Delhi'],DLI:['DELHI JN','Delhi'],
+  KOAA:['KOLKATA','West Bengal'],SBC:['KSR BENGALURU','Karnataka'],MAQ:['MANGALURU CENTRAL','Karnataka'],
+  TVC:['THIRUVANANTHAPURAM CENTRAL','Kerala'],ERS:['ERNAKULAM JN','Kerala'],YPR:['YESVANTPUR JN','Karnataka'],
+  SMVB:['SIR M VISVESVARAYA TERMINAL','Karnataka'],MAS:['CHENNAI CENTRAL','Tamil Nadu'],MAO:['MADGAON JN','Goa'],
+  KRMI:['KARMALI','Goa'],THVM:['THIVIM','Goa']
+};
+const RAIL_CLASSES={'1A':'First AC','2A':'AC 2 Tier','3A':'AC 3 Tier','3E':'AC 3 Economy','SL':'Sleeper','CC':'AC Chair Car','EC':'Executive Chair Car','2S':'Second Sitting','FC':'First Class','EV':'Vistadome Executive','VC':'Vistadome Chair Car','EA':'Anubhuti','VS':'Vistadome Sleeper'};
+const RAIL_QUOTAS={GN:'General',TQ:'Tatkal',PT:'Premium Tatkal',LD:'Ladies',SS:'Senior Citizen',HP:'Divyang',DF:'Defence',PH:'Parliament House',FT:'Foreign Tourist',HO:'Head Quarters'};
+function titleCaseStation(n){
+  return String(n||'').toLowerCase().replace(/\b([a-z])/g,c=>c.toUpperCase()).replace(/\b(Jn|Cst|Csmt|Ksr|Sir)\b/g,m=>m==='Cst'?'CST':m==='Csmt'?'CSMT':m==='Ksr'?'KSR':m==='Sir'?'Sir':m).replace(/\s+/g,' ').trim();
+}
+function stationLabel(name,code){
+  const n=titleCaseStation(name);
+  if(!code) return n;
+  if(!n) return code;
+  if(n.split(' ').pop().toUpperCase()===String(code).toUpperCase()) return n;
+  return n+' ('+code+')';
+}
+function stationByCode(code){
+  if(!RAIL||!code) return null;
+  const e=RAIL.s[String(code).toUpperCase()];
+  return e?{code:String(code).toUpperCase(),name:e[0],state:e[1]}:null;
+}
+function stationByName(name){
+  if(!RAIL||!name) return null;
+  if(!railNameIdx){ railNameIdx={}; Object.entries(RAIL.s).forEach(([c,e])=>{railNameIdx[e[0].toLowerCase().replace(/[^a-z0-9]/g,'')]=c;}); }
+  const k=String(name).toLowerCase().replace(/[^a-z0-9]/g,'');
+  const c=railNameIdx[k];
+  return c?stationByCode(c):null;
+}
+function trainByNumber(n){
+  if(!RAIL||!n) return null;
+  const e=RAIL.t[String(n)];
+  return e?{number:String(n),name:e[0],from:e[1],to:e[2],dep:e[3],arr:e[4],type:e[5]}:null;
+}
+function isIRCTCTicket(flat){
+  return /IRCTC|Electronic Reservation Slip|\bERS\b/i.test(flat) && /\bPNR\b/i.test(flat);
+}
+function parseIRCTCTicket(text){
+  const flat=text.replace(/\s+/g,' ');
+  const r={};
+  // PNR: 10 digits, not part of a longer number (transaction IDs are longer)
+  let m=flat.match(/\bPNR\b[^0-9]{0,40}?(?<!\d)(\d{10})(?!\d)/i)||flat.match(/(?<!\d)([2-9]\d{9})(?!\d)/);
+  if(m) r.pnr=m[1];
+  // Train number / name
+  m=flat.match(/\b(\d{5})\s*\/\s*([A-Za-z][A-Za-z0-9 .\-&']*?)(?=\s+(?:SECOND|THIRD|FIRST|SLEEPER|AC\b|EXEC|CHAIR|VISTADOME|ANUBHUTI|GENERAL|TATKAL|\d[A-Z]\b|\(|Quota|Class)|\s*$)/i);
+  if(m){ r.trainNumber=m[1]; r.trainName=titleCaseStation(m[2].trim()).replace(/\bExp\b/g,'Express'); }
+  else { m=flat.match(/\bTrain\s*(?:No\.?|Number)?\s*[:\-]?\s*(\d{5})\b/i); if(m) r.trainNumber=m[1]; }
+  // Class and quota
+  m=flat.match(/\((1A|2A|3A|3E|SL|CC|EC|2S|FC|EV|VC|EA|VS)\)/)||flat.match(/\bClass\s*[:\-]?\s*(1A|2A|3A|3E|SL|CC|EC|2S|FC|EV|VC|EA|VS)\b/i);
+  if(m) r.trainClass=m[1].toUpperCase();
+  m=flat.match(/\((GN|TQ|PT|LD|SS|HP|DF|PH|FT|HO)\)/)||flat.match(/\bQuota\s*[:\-]?\s*(GN|TQ|PT|LD|SS|HP|DF|PH|FT|HO)\b/i);
+  if(m) r.quota=m[1].toUpperCase();
+  m=flat.match(/\b(\d{1,4})\s*KM\b/i); if(m) r.distanceKm=+m[1];
+  // Stations: "NAME (CODE)" pairs in reading order; booked-from first, destination second
+  const stRe=/([A-Z][A-Z0-9 .'\-&\/]{1,38}?)\s*\(([A-Z]{2,5})\)/g;
+  const skip=new Set([...Object.keys(RAIL_CLASSES),...Object.keys(RAIL_QUOTAS)].filter(c=>c.length<=2||/\d/.test(c)));
+  const sts=[]; let sm;
+  while((sm=stRe.exec(flat))){
+    const code=sm[2];
+    if(/^\d/.test(code)||(skip.has(code)&&!stationByCode(code))) continue;
+    if(RAIL && !stationByCode(code) && !/\b(JN|JUNCTION|CENTRAL|TERMINUS|CANT|CITY|ROAD|TERMINAL|CST|CSMT)\b/i.test(sm[1])) continue;
+    let nm=sm[1].replace(/^.*\b(?:Booked From|From|To|Boarding At|Reservation Upto|Start Date\*?|Departure\*?|Arrival\*?)\s+/i,'').trim();
+    if(!sts.some(x=>x.code===code)) sts.push({name:nm,code});
+  }
+  const bm=flat.match(/Boarding\s*(?:At|Station)?\s*[:\-]?\s*([A-Z][A-Z0-9 .'\-&\/]{1,38}?)\s*\(([A-Z]{2,5})\)/);
+  const um=flat.match(/Reservation\s*Upto\s*[:\-]?\s*([A-Z][A-Z0-9 .'\-&\/]{1,38}?)\s*\(([A-Z]{2,5})\)/);
+  let from=bm?{name:bm[1].trim(),code:bm[2]}:sts[0], to=um?{name:um[1].trim(),code:um[2]}:sts[1];
+  if(from){ const d=stationByCode(from.code); r.from=stationLabel(from.name||(d&&d.name),from.code); r.fromCode=from.code; }
+  if(to){ const d=stationByCode(to.code); r.to=stationLabel(to.name||(d&&d.name),to.code); r.toCode=to.code; }
+  // Departure / arrival: "HH:MM DD-Mon-YYYY" pairs in order
+  const dtRe=/(\d{1,2}:\d{2})\s*(?:hrs)?\s*,?\s*(\d{1,2}[\s\-][A-Za-z]{3}[\s\-]\d{4})/g; const dts=[]; let dm;
+  while((dm=dtRe.exec(flat))) dts.push({time:dm[1],date:guessDateISO(dm[2])});
+  if(dts[0]){ r.time=dts[0].time.padStart(5,'0'); r.date=dts[0].date; }
+  if(dts[1]){ r.arrivalTime=dts[1].time.padStart(5,'0'); r.arrivalDate=dts[1].date; }
+  if(!r.date){ m=flat.match(/Start\s*Date\*?\s*(\d{1,2}[\s\-][A-Za-z]{3}[\s\-]\d{4})/i); if(m) r.date=guessDateISO(m[1]); }
+  // Passengers
+  const STAT='(?:CNF|RAC|WL|RLWL|GNWL|PQWL|RSWL|TQWL|CAN|REGRET)';
+  const pRe=new RegExp(String.raw`(?<![\d/])(\d{1,2})\s+([A-Za-z][A-Za-z .']{1,32}?)\s+(\d{1,3})\s+(Male|Female|Transgender|M|F|T)\b(?:\s+(?:Veg|Non-?Veg|No Food|-))?\s+(`+STAT+String.raw`(?:\s*/\s*[A-Za-z0-9 ]+?)*)(?=\s+`+STAT+String.raw`\b|\s+\d{1,2}\s+[A-Za-z]|\s+Transaction|\s+IRCTC|\s+Ticket|\s+Total|\s*$)`,'g');
+  const pax=[]; let pm;
+  while((pm=pRe.exec(flat))){
+    const parts=pm[5].split('/').map(x=>x.trim());
+    pax.push({status:parts[0],coach:parts[1]||'',seat:parts[2]||'',berth:parts[3]||''});
+  }
+  if(pax.length){
+    r.passengerCount=pax.length;
+    r.seatNumbers=pax.map(x=>x.status==='CNF'||x.status==='RAC'?[x.coach,x.seat].filter(Boolean).join(' ')||x.status:(x.status+(x.coach?' '+x.coach:''))).join(', ');
+    r.bookingStatus=[...new Set(pax.map(x=>x.status))].join('/');
+    r.berths=pax.map(x=>x.berth).filter(Boolean).join(', ');
+  }
+  // Fare
+  m=flat.match(/Total\s*Fare[^0-9]{0,40}?(\d[\d,]*(?:\.\d+)?)/i); if(m) r.fare=parseFloat(m[1].replace(/,/g,''));
+  // Database enrichment (ticket values win)
+  const t=trainByNumber(r.trainNumber);
+  if(t){
+    if(!r.trainName) r.trainName=cleanDbTrainName(t.name);
+    r.dbRoute=(stationByCode(t.from)?titleCaseStation(stationByCode(t.from).name):t.from)+' → '+(stationByCode(t.to)?titleCaseStation(stationByCode(t.to).name):t.to);
+  } else if(r.trainNumber && RAIL){ r.trainNotInDb=true; }
+  if(!r.from && r.fromCode){ const d=stationByCode(r.fromCode); if(d) r.from=stationLabel(d.name,d.code); }
+  return r;
+}
+function cleanDbTrainName(raw){
+  let n=titleCaseStation(raw).replace(/\bExp\b/g,'Express');
+  const generic=/^(Express|Mail|Special|Passenger|Superfast|Superfast Express|Mail Express|Fast Passenger)$/i;
+  const m=n.match(/^[A-Za-z .]+?\s*-\s*[A-Za-z .]+?\s+((?:Jan Shatabdi|Shatabdi|Rajdhani|Duronto|Garib Rath|Vande Bharat|Humsafar|Tejas|Sampark Kranti|Double Decker|Antyodaya|Intercity|Superfast|Express|Mail|Special|Passenger)\b.*)$/);
+  if(m && !generic.test(m[1])) n=m[1];
+  return n;
+}
+function enrichTrainFromDb(r){
+  if(!RAIL) return;
+  ['from','to'].forEach(k=>{
+    if(r[k] && /^[A-Z]{2,5}$/.test(r[k])){ const d=stationByCode(r[k]); if(d){ r[k+'Code']=d.code; r[k]=stationLabel(d.name,d.code); } }
+  });
+  const t=trainByNumber(r.trainNumber);
+  if(t && !r.trainName) r.trainName=cleanDbTrainName(t.name);
+  if(t && !r.dbRoute){
+    const nm=c=>stationByCode(c)?titleCaseStation(stationByCode(c).name):c;
+    r.dbRoute=nm(t.from)+' \u2192 '+nm(t.to);
+  }
+  if(r.trainNumber && !t) r.trainNotInDb=true;
+}
+function fmtINR(n){return Number(n).toLocaleString('en-IN',{minimumFractionDigits:n%1?2:0,maximumFractionDigits:2});}
+function railNotes(p){
+  const bits=[];
+  if(p.trainClass) bits.push((RAIL_CLASSES[p.trainClass]||p.trainClass)+' ('+p.trainClass+')');
+  if(p.quota) bits.push((RAIL_QUOTAS[p.quota]||p.quota)+' quota');
+  if(p.bookingStatus) bits.push(p.bookingStatus);
+  if(p.berths) bits.push(p.berths);
+  if(p.distanceKm) bits.push(p.distanceKm+' km');
+  if(p.arrivalTime) bits.push('Arrives '+p.arrivalTime+(p.arrivalDate?' '+fmtDate(p.arrivalDate):''));
+  if(p.passengerCount) bits.push(p.passengerCount+' passenger'+(p.passengerCount>1?'s':''));
+  return bits.join(' · ');
+}
 function parseBookingText(text){
   const result={type:null};
   const flat=text.replace(/\s+/g,' ');
-  const hasIRCTC=/IRCTC|\bTrain\s*No\b|\bCoach\b[^.]{0,30}\bSeat\b|PNR\s*[:\-]?\s*\d{10}\b/i.test(flat);
+  const hasIRCTC=/IRCTC|Electronic Reservation Slip|\bTrain\s*No\b|\bCoach\b[^.]{0,30}\bSeat\b|PNR\s*[:\-]?\s*\d{10}\b/i.test(flat);
   const hasFlightHints=/Boarding Pass|E-?Ticket|\bPNR\b|Flight\s*No|\bDeparture\b|Airlines?\b/i.test(flat)||/\b[A-Z]{3}\s*(?:-|to|→)\s*[A-Z]{3}\b/.test(flat);
   const hasHotelHints=/Check-?in|Check-?out|\bHotel\b|Room Type|Booking\.com|Agoda|Reservation/i.test(flat);
   if(hasIRCTC)result.type='train';
@@ -669,12 +847,29 @@ function parseBookingText(text){
   if(m)result.pnr=m[1];
 
   if(result.type==='flight'||!result.type){
-    result.airline=guessAirline(text);
-    m=flat.match(/\b([A-Z]{3})\s*(?:-|to|→|—|>)\s*([A-Z]{3})\b/);
-    if(m){result.from=m[1];result.to=m[2];}
+    const fnum=findFlightNumber(text);
+    if(fnum){ result.flightNumber=fnum.code+fnum.num; result.airline=airlineByCode(fnum.code)||guessAirline(text); }
+    else result.airline=guessAirline(text);
+    const routeRe=/\b([A-Z]{3})\s*(?:-|to|→|—|>)\s*([A-Z]{3})\b/g;
+    let rm,firstPair=null;
+    while((rm=routeRe.exec(flat))){
+      if(!firstPair) firstPair=rm;
+      if(!REF || (airportInfo(rm[1])&&airportInfo(rm[2]))){ firstPair=rm; break; }
+    }
+    if(!firstPair && REF){
+      const pm=flat.match(/\(([A-Z]{3})\)\s*(?:-|to|\u2192|\u2014|\u2013|>)?\s*[A-Za-z .,]{0,25}?\(([A-Z]{3})\)/);
+      if(pm && airportInfo(pm[1]) && airportInfo(pm[2])) firstPair=pm;
+    }
+    if(firstPair){
+      result.from=firstPair[1]; result.to=firstPair[2];
+      const fi=airportInfo(result.from), ti=airportInfo(result.to);
+      if(fi) result.fromCity=fi.city;
+      if(ti) result.toCity=ti.city;
+    }
     const flightDate=guessDateNearTime(flat)||guessLabeledDate(flat,['Departure(?:\\s*Date)?','Date\\s*of\\s*Journey','Travel\\s*Date','Flight\\s*Date','DOJ']);
     if(flightDate)result.date=flightDate;
   }
+  if(!result.type && (result.flightNumber||result.from)) result.type='flight';
   if(result.type==='train'){
     m=flat.match(/\bTrain\s*(?:No\.?|Number)?\s*[:\-]?\s*(\d{4,5})\b/i);
     if(m)result.trainNumber=m[1];
@@ -686,6 +881,12 @@ function parseBookingText(text){
     if(coach||seat)result.seatNumbers=(coach?coach+' ':'')+seat;
     const journeyDate=guessDateNearTime(flat)||guessLabeledDate(flat,['Date\\s*of\\s*Journey','DOJ','Travel\\s*Date']);
     if(journeyDate)result.date=journeyDate;
+    if(isIRCTCTicket(flat)){
+      const ir=parseIRCTCTicket(text);
+      Object.keys(ir).forEach(k=>{ if(ir[k]!==undefined&&ir[k]!=='') result[k]=ir[k]; });
+      result.irctc=true;
+    }
+    enrichTrainFromDb(result);
   }
   if(result.type==='stay'){
     m=flat.match(/\bCheck-?in\s*[:\-]?\s*([^,;]{4,20})/i);
@@ -704,6 +905,31 @@ function parseBookingText(text){
   const t=guessTime(flat); if(t)result.time=t;
   return result;
 }
+function applyParsedFlight(parsed){
+  const set=(id,v)=>{const el=document.getElementById(id); if(el&&v) el.value=v;};
+  set('f-airline',parsed.airline); set('f-pnr',parsed.pnr); set('f-flightno',parsed.flightNumber);
+  set('f-from',parsed.from); set('f-to',parsed.to);
+  updateAirportHints();
+}
+function updateAirportHints(){
+  [['f-from','f-from-hint'],['f-to','f-to-hint']].forEach(([i,h])=>{
+    const inp=document.getElementById(i), hint=document.getElementById(h);
+    if(!inp||!hint) return;
+    const info=airportInfo(inp.value.trim());
+    hint.textContent=info?(info.city+', '+info.country):'';
+  });
+}
+async function quickFillFlight(value){
+  const v=(value||'').trim(); if(!v) return;
+  await loadRefData();
+  const parsed=parseBookingText('Flight '+v.toUpperCase());
+  if(!parsed.flightNumber && !parsed.from){ toast('Try a format like AA944 MIA-JFK'); return; }
+  parsed.type='flight';
+  applyParsedFlight(parsed);
+  const titleEl=document.getElementById('f-title');
+  if(titleEl&&!titleEl.value&&parsed.to) titleEl.value='Flight to '+(parsed.toCity||parsed.to);
+  toast('Filled in from flight code');
+}
 async function handleActivityFileAttach(file){
   if(!file)return;
   pendingActivityFile=file;
@@ -712,6 +938,7 @@ async function handleActivityFileAttach(file){
 
   let text=null;
   let sourceLabel='file';
+  await loadBookingData();
   try{
     if(file.type==='application/pdf'){
       setNote('Reading file…','var(--flap)');
@@ -741,18 +968,19 @@ async function handleActivityFileAttach(file){
   if(parsed.date)document.getElementById('f-date').value=parsed.date;
   if(parsed.time)document.getElementById('f-time').value=parsed.time;
   if(parsed.type==='flight'){
-    if(parsed.airline)document.getElementById('f-airline').value=parsed.airline;
-    if(parsed.pnr)document.getElementById('f-pnr').value=parsed.pnr;
-    if(parsed.from)document.getElementById('f-from').value=parsed.from;
-    if(parsed.to)document.getElementById('f-to').value=parsed.to;
-    if(titleEl&&!titleEl.value&&parsed.to)titleEl.value='Flight to '+parsed.to;
+    applyParsedFlight(parsed);
+    if(titleEl&&!titleEl.value&&parsed.to)titleEl.value='Flight to '+(parsed.toCity||parsed.to);
   }
   if(parsed.type==='train'){
     if(parsed.from)document.getElementById('f-train-from').value=parsed.from;
     if(parsed.to)document.getElementById('f-train-to').value=parsed.to;
     if(parsed.trainNumber)document.getElementById('f-train-num').value=parsed.trainNumber;
     if(parsed.seatNumbers)document.getElementById('f-train-seat').value=parsed.seatNumbers;
-    if(titleEl&&!titleEl.value&&parsed.to)titleEl.value='Train to '+parsed.to;
+    if(parsed.trainName)document.getElementById('f-train-name').value=parsed.trainName;
+    if(parsed.pnr)document.getElementById('f-train-pnr').value=parsed.pnr;
+    if(parsed.trainClass)document.getElementById('f-train-class').value=parsed.trainClass;
+    if(parsed.irctc){ const nt=document.getElementById('f-notes'); if(nt&&!nt.value) nt.value=railNotes(parsed); }
+    if(titleEl&&!titleEl.value&&parsed.to)titleEl.value=(parsed.trainName?parsed.trainName+' to ':'Train to ')+String(parsed.to).replace(/\s*\(.*$/,'');
   }
   if(parsed.type==='stay'){
     if(parsed.location)document.getElementById('f-location').value=parsed.location;
@@ -823,7 +1051,8 @@ async function init(){
     try{route=JSON.parse(decodeURIComponent(location.hash.slice(1)));}catch(e){}
   }
   lastHash=location.hash;
-  render();
+  await render();
+  handleImportParam();
 }
 
 async function render(){
@@ -845,6 +1074,8 @@ async function backupNudgeHTML(){
     <span class="nudge-actions">
       <span class="nudge-link" onclick="exportData()">Back up</span>
       <label class="nudge-link">Restore<input type="file" accept=".json" style="display:none" onchange="importData(event)"></label>
+      <span class="nudge-link" onclick="openImportSheet('')">Import</span>
+      <span class="nudge-link" onclick="openLimitsSheet()">Limits</span>
       <span class="nudge-link" onclick="openPassportForm()">Passport</span>
       ${templates.length?`<span class="nudge-link" onclick="openPersonalTemplatesForm()">Templates</span>`:''}
     </span>
@@ -852,7 +1083,7 @@ async function backupNudgeHTML(){
 }
 async function renderHome(){
   const trips=(await idAll('trips')).sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
-  const nudge=await backupNudgeHTML();
+  const nudge=(await backupNudgeHTML())+(await shortcutNudgeHTML());
   const active=trips.filter(t=>tripStatus(t)==='active');
   const planned=trips.filter(t=>tripStatus(t)==='planned');
   const tentative=trips.filter(t=>tripStatus(t)==='tentative');
@@ -1197,7 +1428,10 @@ async function renderTrip(tripId,tab){
         <div class="name">${esc(trip.destination)} <span class="hero-edit">${ICONS.edit}</span></div>
         <div class="dates mono">${tripDateLabel(trip)} <span class="tag">${trip.tripType||'domestic'}</span></div>
       </div>
-      <button class="icon-btn" style="flex:none;" onclick="openQuickNoteForm('${trip.id}')" title="Quick note">${ICONS.file}</button>
+      <div style="display:flex;gap:8px;flex:none;">
+        <button class="icon-btn" onclick="openShareCard('${trip.id}')" title="Share trip card">${ICONS.share}</button>
+        <button class="icon-btn" onclick="openQuickNoteForm('${trip.id}')" title="Quick note">${ICONS.file}</button>
+      </div>
     </div>
     ${notesCardHTML(trip,notes)}
     ${suggestionsHTML(trip,suggestions)}
@@ -1376,7 +1610,7 @@ function routeTimelineHTML(activities){
     html+=`<div class="route-leg">
       <div class="rail"><div class="dot"></div><div class="line"></div></div>
       <div class="rinfo">
-        <div class="rcity">${esc(leg.from||'?')} → ${esc(leg.to||'?')}</div>
+        <div class="rcity">${esc(routeLabel(leg))}</div>
         <div class="rmeta">${legLabel(leg)}${leg.date?' · '+fmtDate(leg.date):''}${leg.time?' · '+esc(leg.time):''}${leg.type==='train'&&leg.trainNumber?' · #'+esc(leg.trainNumber):''}${leg.type==='flight'&&leg.airline?' · '+esc(leg.airline):''}</div>
       </div>
     </div>`;
@@ -1396,16 +1630,19 @@ function activityRowHTML(a){
   let extra='';
   if(a.type==='flight' && (a.from||a.to||a.airline||a.pnr)){
     extra+=`<div class="t2">`;
-    if(a.from||a.to) extra+=`<span class="flight-route">${esc(a.from||'?')} → ${esc(a.to||'?')}</span>`;
-    if(a.airline) extra+=`${a.from||a.to?' · ':''}${esc(a.airline)}`;
+    if(a.from||a.to) extra+=`<span class="flight-route">${esc(routeLabel(a))}</span>`;
+    if(a.flightNumber) extra+=`${a.from||a.to?' · ':''}${esc(a.flightNumber)}`;
+    if(a.airline) extra+=`${a.from||a.to||a.flightNumber?' · ':''}${esc(a.airline)}`;
     if(a.pnr) extra+=` · PNR ${esc(a.pnr)}`;
     extra+=`</div>`;
   }
-  if(a.type==='train' && (a.from||a.to||a.trainNumber||a.seatNumbers)){
+  if(a.type==='train' && (a.from||a.to||a.trainNumber||a.seatNumbers||a.pnr)){
     extra+=`<div class="t2">`;
     if(a.from||a.to) extra+=`<span class="flight-route">${esc(a.from||'?')} → ${esc(a.to||'?')}</span>`;
-    if(a.trainNumber) extra+=`${a.from||a.to?' · ':''}#${esc(a.trainNumber)}`;
+    if(a.trainNumber) extra+=`${a.from||a.to?' · ':''}#${esc(a.trainNumber)}${a.trainName?' '+esc(a.trainName):''}`;
+    if(a.trainClass) extra+=` · ${esc(a.trainClass)}`;
     if(a.seatNumbers) extra+=` · Seat ${esc(a.seatNumbers)}`;
+    if(a.pnr) extra+=` · PNR ${esc(a.pnr)}`;
     extra+=`</div>`;
   }
   if(a.type==='stay' && a.location){
@@ -1432,6 +1669,7 @@ function activityRowHTML(a){
       <div class="t1">${esc(a.title)}</div>
       <div class="t2">${a.date?fmtDate(a.date):'no date set'}${a.time?' · '+esc(a.time):''}</div>
       ${extra}
+      ${(a.importFlags&&a.importFlags.length)?`<div class="t2" style="color:var(--rose);font-weight:600;">Imported: please check ${esc(a.importFlags.join(', '))}</div>`:''}
       ${a.notes?`<div class="t2">${esc(a.notes)}</div>`:''}
     </div>
     <div style="text-align:right;">
@@ -1440,9 +1678,10 @@ function activityRowHTML(a){
   </div>`;
 }
 function activitiesTabHTML(trip,activities){
-  if(activities.length===0) return `<div class="board"><div class="empty"><div class="big">${ICONS.activities}</div>Log flights, trains, stays, tours &amp; plans here.</div></div>`;
+  if(activities.length===0) return `<div class="board"><div class="empty"><div class="big">${ICONS.activities}</div>Log flights, trains, stays, tours &amp; plans here.<div style="margin-top:12px;"><span class="add" onclick="openImportSheet('${trip.id}')">${ICONS.file} Paste a booking</span></div></div></div>`;
 
-  let html=`<div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
+  let html=`<div style="display:flex;justify-content:flex-end;gap:14px;margin-bottom:10px;">
+    <span class="add" onclick="openImportSheet('${trip.id}')">${ICONS.file} Paste booking</span>
     <span class="add" onclick="exportTripICS('${trip.id}')">${ICONS.calendarPlus} Export itinerary</span>
   </div>`;
   html+=routeTimelineHTML(activities);
@@ -1496,6 +1735,10 @@ function closeSheet(){
   pickedSingle={};
   pendingActivityFile=null;
   pendingExpenseFile=null;
+  importParsed=null;
+  importLegs=[];
+  importFile=null;
+  importSource='text';
 }
 
 /* ---- Create / edit trip ---- */
@@ -2078,7 +2321,27 @@ function onActivityTypeChange(type){
   document.getElementById('transport-fields').classList.toggle('hidden',type!=='transport');
   document.getElementById('generic-date-fields').classList.toggle('hidden',type==='stay');
 }
+async function trainNoChanged(){
+  await loadRailData();
+  const n=(document.getElementById('f-train-num').value||'').trim();
+  const t=trainByNumber(n), hint=document.getElementById('f-train-hint'), nm=document.getElementById('f-train-name');
+  if(!hint) return;
+  if(t){
+    const nmv=cleanDbTrainName(t.name);
+    if(nm&&!nm.value.trim()) nm.value=nmv;
+    const st=c=>stationByCode(c)?titleCaseStation(stationByCode(c).name):c;
+    hint.textContent='Runs '+st(t.from)+' \u2192 '+st(t.to)+(t.dep?', departs '+t.dep:'');
+  } else hint.textContent=!RAIL?'Train lookup not loaded (needs internet the first time).':(n.length>=5?'Not in the train list, which is several years old. Newer trains can be missing.':'');
+}
+async function flightNoChanged(){
+  await loadRefData();
+  const v=(document.getElementById('f-flightno').value||'').trim().toUpperCase().replace(/\s+/g,'');
+  const m=v.match(/^([A-Z0-9]{2})(\d{1,4})$/);
+  const air=document.getElementById('f-airline');
+  if(m && air && !air.value.trim()){ const n=airlineByCode(m[1]); if(n) air.value=n; }
+}
 async function openActivityForm(tripId,activityId){
+  loadBookingData().then(()=>setTimeout(updateAirportHints,0));
   const trip=await idGet('trips',tripId);
   const editing=activityId?await idGet('activities',activityId):null;
   const src=editing||{};
@@ -2103,13 +2366,17 @@ async function openActivityForm(tripId,activityId){
     </div>
 
     <div id="flight-fields" class="hidden">
+      <div class="field"><label>Quick fill <span style="color:var(--muted)">(e.g. AA944 MIA-JFK)</span></label><input id="f-quickfill" placeholder="Type a flight code and route" onchange="quickFillFlight(this.value)"></div>
+      <div class="field-row">
+        <div class="field"><label>Flight no.</label><input id="f-flightno" placeholder="e.g. AA944" value="${esc(src.flightNumber||'')}" onchange="flightNoChanged()"></div>
+      </div>
       <div class="field-row">
         <div class="field"><label>Airline</label><input id="f-airline" placeholder="e.g. TAP Air" value="${esc(src.airline||'')}"></div>
         <div class="field"><label>PNR</label><input id="f-pnr" placeholder="e.g. TP4X9L" value="${esc(src.pnr||'')}"></div>
       </div>
       <div class="field-row">
-        <div class="field"><label>From</label><input id="f-from" placeholder="e.g. BOM" value="${src.type==='flight'?esc(src.from||''):''}"></div>
-        <div class="field"><label>To</label><input id="f-to" placeholder="e.g. LIS" value="${src.type==='flight'?esc(src.to||''):''}"></div>
+        <div class="field"><label>From</label><input id="f-from" placeholder="e.g. BOM" value="${src.type==='flight'?esc(src.from||''):''}" onchange="updateAirportHints()"><div class="t2" id="f-from-hint"></div></div>
+        <div class="field"><label>To</label><input id="f-to" placeholder="e.g. LIS" value="${src.type==='flight'?esc(src.to||''):''}" onchange="updateAirportHints()"><div class="t2" id="f-to-hint"></div></div>
       </div>
     </div>
 
@@ -2119,9 +2386,15 @@ async function openActivityForm(tripId,activityId){
         <div class="field"><label>To station</label><input id="f-train-to" placeholder="e.g. Pune Jn" value="${src.type==='train'?esc(src.to||''):''}"></div>
       </div>
       <div class="field-row">
-        <div class="field"><label>Train number</label><input id="f-train-num" placeholder="e.g. 12123" value="${esc(src.trainNumber||'')}"></div>
+        <div class="field"><label>Train number</label><input id="f-train-num" placeholder="e.g. 12123" value="${esc(src.trainNumber||'')}" onchange="trainNoChanged()"></div>
         <div class="field"><label>Seat number(s)</label><input id="f-train-seat" placeholder="e.g. B4 22,23" value="${esc(src.seatNumbers||'')}"></div>
       </div>
+      <div class="t2" id="f-train-hint" style="margin:-6px 0 8px;"></div>
+      <div class="field-row">
+        <div class="field"><label>Train name</label><input id="f-train-name" placeholder="e.g. Jan Shatabdi" value="${esc(src.trainName||'')}"></div>
+        <div class="field"><label>PNR</label><input id="f-train-pnr" placeholder="10 digits" value="${esc(src.type==='train'?(src.pnr||''):'')}"></div>
+      </div>
+      <div class="field"><label>Class</label><input id="f-train-class" placeholder="e.g. 3A, SL, CC" value="${esc(src.trainClass||'')}"></div>
     </div>
 
     <div id="stay-fields" class="hidden">
@@ -2174,21 +2447,29 @@ async function saveActivity(tripId,activityId){
   const notes=document.getElementById('f-notes').value.trim();
   if(!title){toast('Give it a title');return;}
   const existing=activityId?await idGet('activities',activityId):null;
-  const activity={id:activityId||uid(),tripId,type,title,date,time,notes};
+  const activity={...(existing||{}),id:activityId||uid(),tripId,type,title,date,time,notes};
+  delete activity.importFlags;
   if(existing&&existing.expenseId) activity.expenseId=existing.expenseId;
   if(pendingActivityFile) activity.ticketFile=pendingActivityFile;
   else if(existing&&existing.ticketFile) activity.ticketFile=existing.ticketFile;
   if(type==='flight'){
     activity.airline=document.getElementById('f-airline').value.trim();
     activity.pnr=document.getElementById('f-pnr').value.trim();
-    activity.from=document.getElementById('f-from').value.trim();
-    activity.to=document.getElementById('f-to').value.trim();
+    activity.from=document.getElementById('f-from').value.trim().toUpperCase();
+    activity.to=document.getElementById('f-to').value.trim().toUpperCase();
+    activity.flightNumber=(document.getElementById('f-flightno').value||'').trim().toUpperCase().replace(/\s+/g,'');
+    const fi=airportInfo(activity.from), ti=airportInfo(activity.to);
+    if(fi) activity.fromCity=fi.city; else delete activity.fromCity;
+    if(ti) activity.toCity=ti.city; else delete activity.toCity;
   }
   if(type==='train'){
     activity.from=document.getElementById('f-train-from').value.trim();
     activity.to=document.getElementById('f-train-to').value.trim();
     activity.trainNumber=document.getElementById('f-train-num').value.trim();
     activity.seatNumbers=document.getElementById('f-train-seat').value.trim();
+    activity.trainName=document.getElementById('f-train-name').value.trim();
+    activity.pnr=document.getElementById('f-train-pnr').value.trim();
+    activity.trainClass=document.getElementById('f-train-class').value.trim().toUpperCase();
   }
   if(type==='stay'){
     activity.location=document.getElementById('f-location').value.trim();
@@ -2346,12 +2627,15 @@ function activityToVEVENT(a){
   let location='';
   const desc=[];
   if(a.type==='flight'){
+    if(a.flightNumber) desc.push('Flight: '+a.flightNumber);
     if(a.airline) desc.push('Airline: '+a.airline);
     if(a.pnr) desc.push('PNR: '+a.pnr);
-    if(a.from||a.to) location=(a.from||'')+' \u2192 '+(a.to||'');
+    if(a.from||a.to) location=routeLabel(a);
   }
   if(a.type==='train'){
-    if(a.trainNumber) desc.push('Train #'+a.trainNumber);
+    if(a.trainNumber) desc.push('Train #'+a.trainNumber+(a.trainName?' '+a.trainName:''));
+    if(a.pnr) desc.push('PNR: '+a.pnr);
+    if(a.trainClass) desc.push('Class: '+a.trainClass);
     if(a.seatNumbers) desc.push('Seat: '+a.seatNumbers);
     if(a.from||a.to) location=(a.from||'')+' \u2192 '+(a.to||'');
   }
@@ -2396,6 +2680,758 @@ async function exportTripICS(tripId){
   const vevents=activities.map(activityToVEVENT).filter(Boolean);
   if(!vevents.length){ toast('No dated activities to export yet'); return; }
   downloadICS(buildICS(vevents,trip.destination), (trip.destination||'trip').replace(/[^a-z0-9]+/gi,'-').toLowerCase()+'-itinerary.ics');
+}
+
+/* ---------------- Trip Share Card (solo-safety lite) ---------------- */
+function shareDateTime(a){
+  const d=a.date||a.checkIn||'';
+  return (d?fmtDate(d):'Date TBC')+(a.time?' '+a.time:'');
+}
+function buildShareText(trip,activities,opts){
+  opts=opts||{};
+  const refs=opts.refs!==false;
+  const L=[];
+  L.push('Trip: '+(trip.destination||'Untitled')+' ('+tripDateLabel(trip)+')');
+  L.push('Shared from Compass');
+  const byDate=(x,y)=>((x.date||x.checkIn||'9999')+(x.time||'')).localeCompare((y.date||y.checkIn||'9999')+(y.time||''));
+  const group=t=>activities.filter(a=>a.type===t).sort(byDate);
+  const flights=group('flight'), trains=group('train'), stays=group('stay'), transport=group('transport'), things=group('activity');
+  if(flights.length){
+    L.push('','FLIGHTS');
+    flights.forEach(a=>{
+      const route=(a.from||a.to)?routeLabel(a).replace('\u2192','>'):(a.title||'Flight');
+      L.push('- '+shareDateTime(a)+' | '+route+(a.flightNumber?' | '+a.flightNumber:'')+(a.airline?' | '+a.airline:'')+(refs&&a.pnr?' | PNR '+a.pnr:''));
+    });
+  }
+  if(trains.length){
+    L.push('','TRAINS');
+    trains.forEach(a=>{
+      const route=(a.from||a.to)?(a.from||'?')+' > '+(a.to||'?'):(a.title||'Train');
+      L.push('- '+shareDateTime(a)+' | '+route+(a.trainNumber?' | Train '+a.trainNumber+(a.trainName?' '+a.trainName:''):'')+(refs&&a.seatNumbers?' | Seat '+a.seatNumbers:'')+(refs&&a.pnr?' | PNR '+a.pnr:''));
+    });
+  }
+  if(stays.length){
+    L.push('','STAYING AT');
+    stays.forEach(a=>{
+      const range=a.checkIn?(fmtDate(a.checkIn)+(a.checkOut?' - '+fmtDate(a.checkOut):'')):'Dates TBC';
+      L.push('- '+(a.title||'Stay')+' | '+range);
+      if(a.location){
+        L.push('  '+a.location);
+        L.push('  Map: https://maps.google.com/?q='+encodeURIComponent(a.location));
+      }
+    });
+  }
+  if(transport.length){
+    L.push('','LOCAL TRANSPORT');
+    transport.forEach(a=>{
+      const route=(a.from||a.to)?(a.from||'?')+' > '+(a.to||'?'):(a.title||'Transport');
+      L.push('- '+shareDateTime(a)+' | '+(a.transportMode||'Transport')+' | '+route+(refs&&a.bookingRef?' | Ref '+a.bookingRef:''));
+    });
+  }
+  const dated=things.filter(a=>a.date);
+  if(dated.length){
+    L.push('','PLANNED');
+    dated.forEach(a=>L.push('- '+shareDateTime(a)+' | '+(a.title||'Activity')));
+  }
+  if(!flights.length&&!trains.length&&!stays.length&&!transport.length&&!dated.length){
+    L.push('','(No bookings added yet)');
+  }
+  return L.join('\n');
+}
+function buildCheckinICS(trip,timeHHMM,contact){
+  const start=trip.startDate, end=trip.endDate||trip.startDate;
+  if(!start) return null;
+  const days=Math.max(1,Math.round((new Date(end+'T00:00:00')-new Date(start+'T00:00:00'))/86400000)+1);
+  const [h,m]=timeHHMM.split(':');
+  const dt=start.replace(/-/g,'')+'T'+h+m+'00';
+  const who=(contact||'').trim();
+  const lines=[
+    'BEGIN:VEVENT',
+    'UID:checkin-'+trip.id+'@compass-app',
+    'DTSTAMP:'+icsStamp(),
+    'DTSTART:'+dt,
+    'DURATION:PT15M',
+    'RRULE:FREQ=DAILY;COUNT='+days,
+    'SUMMARY:'+icsEscape('Check in'+(who?' with '+who:'')+' - '+(trip.destination||'trip')),
+    'DESCRIPTION:'+icsEscape('Send a quick "all good" message'+(who?' to '+who:'')+' and share where you are tonight.'),
+    'BEGIN:VALARM','ACTION:DISPLAY','DESCRIPTION:Check in','TRIGGER:PT0M','END:VALARM',
+    'END:VEVENT'
+  ];
+  return buildICS([lines.join('\r\n')],(trip.destination||'Trip')+' check-ins');
+}
+
+/* ---------------- Trading-card share image ---------------- */
+const CARD_THEMES={
+  beach:{label:'Beach',sky:['#ffb38a','#ff7e8b','#5b3b8c'],accent:'#ffd166',kw:['goa','bali','maldives','phuket','krabi','cancun','tulum','hawaii','honolulu','miami','ibiza','pattaya','andaman','havelock','lakshadweep','gokarna','varkala','kovalam','beach','island','coast','seychelles','mauritius','zanzibar','santorini','mykonos','cabo','dallas-fort worth-cancun','mexico','fiji','langkawi','boracay','sri lanka','colombo']},
+  mountain:{label:'Mountain',sky:['#9ad0ec','#5b8fd6','#26306b'],accent:'#e6f4ff',kw:['manali','shimla','leh','ladakh','spiti','kashmir','srinagar','darjeeling','gangtok','sikkim','nainital','mussoorie','rishikesh','himalaya','alps','switzerland','zermatt','nepal','kathmandu','bhutan','thimphu','paro','everest','kedarnath','auli','dharamshala','mcleodganj','kasol','banff','patagonia','andes','queenstown','mountain','hills','trek','interlaken','innsbruck']},
+  city:{label:'City',sky:['#1b1f4b','#5a2a7a','#e8618c'],accent:'#ffd166',kw:['new york','nyc','dubai','singapore','tokyo','london','hong kong','bangkok','mumbai','bangalore','bengaluru','hyderabad','chennai','kolkata','pune','seoul','sydney','toronto','chicago','los angeles','san francisco','berlin','amsterdam','shanghai','kuala lumpur','dallas','houston','doha','paris','boston','seattle','osaka','melbourne','city']},
+  desert:{label:'Desert',sky:['#ffd28a','#f08a4b','#7a2e2e'],accent:'#fff1c1',kw:['jaisalmer','pushkar','bikaner','kutch','rann','sahara','wadi','abu dhabi','desert','marrakech','sam sand','petra','dunes','muscat','oman','jordan','egypt','cairo','namibia','las vegas','phoenix','arizona']},
+  forest:{label:'Forest',sky:['#bfe8c9','#4aa36b','#134e3a'],accent:'#eaffd0',kw:['kerala','munnar','coorg','wayanad','ooty','kodaikanal','corbett','kaziranga','ranthambore','sundarbans','amazon','costa rica','borneo','chikmagalur','meghalaya','shillong','cherrapunji','thekkady','alleppey','kabini','bandipur','forest','national park','safari','nagaland','arunachal','kenya','tanzania','serengeti','jungle','yellowstone']},
+  heritage:{label:'Heritage',sky:['#ffe2a8','#e0853d','#5b2a46'],accent:'#fff3d6',kw:['agra','jaipur','udaipur','jodhpur','varanasi','hampi','khajuraho','rome','athens','kyoto','istanbul','prague','florence','venice','vienna','barcelona','lisbon','porto','siem reap','angkor','bagan','mysore','amritsar','lucknow','delhi','temple','fort','palace','madurai','konark','puri','orchha','baroda','vadodara','ahmedabad','budapest','edinburgh']},
+  compass:{label:'Classic',sky:['#2f7a4f','#1e4d34','#0f2a1f'],accent:'#c8f7d4',kw:[]}
+};
+const CARD_THEME_ORDER=['beach','mountain','city','desert','forest','heritage','compass'];
+function detectCardTheme(trip,activities){
+  const names=[(trip.destination||'')];
+  (activities||[]).filter(a=>a.type==='flight'||a.type==='train').forEach(a=>{ if(a.toCity) names.push(a.toCity); if(a.to) names.push(a.to); });
+  const hay=names.join(' | ').toLowerCase();
+  const first=(trip.destination||'').toLowerCase();
+  for(const k of ['beach','mountain','desert','forest','heritage','city']){
+    if(CARD_THEMES[k].kw.some(w=>first.includes(w))) return k;
+  }
+  for(const k of ['beach','mountain','desert','forest','heritage','city']){
+    if(CARD_THEMES[k].kw.some(w=>new RegExp('\\b'+escapeRegex(w)+'\\b').test(hay))) return k;
+  }
+  return 'compass';
+}
+function cardRarity(trip,activities){
+  const flights=activities.filter(a=>a.type==='flight').length;
+  const stays=activities.filter(a=>a.type==='stay').length;
+  const days=(trip.startDate&&trip.endDate)?daysBetween(trip.endDate,trip.startDate)+1:1;
+  const score=(trip.tripType==='international'?2:0)+Math.min(flights,3)+Math.min(stays,2)+(days>=7?1:0)+(days>=14?1:0);
+  if(score>=7) return {name:'LEGENDARY',color:'#ffcf4a'};
+  if(score>=5) return {name:'EPIC',color:'#c58bff'};
+  if(score>=3) return {name:'RARE',color:'#5ec8ff'};
+  return {name:'COMMON',color:'#cfd8d3'};
+}
+function hashStr(str){let h=2166136261;for(let i=0;i<str.length;i++){h^=str.charCodeAt(i);h=Math.imul(h,16777619);}return h>>>0;}
+function seededRand(seed){let a=seed>>>0;return()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function cardRR(ctx,x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
+function cardFit(ctx,text,maxW,start,min,weight){
+  let size=start; ctx.font=(weight||700)+' '+size+'px Poppins, sans-serif';
+  while(ctx.measureText(text).width>maxW && size>min){size-=2;ctx.font=(weight||700)+' '+size+'px Poppins, sans-serif';}
+  return size;
+}
+function cardMotif(ctx,theme,x,y,w,h,rand){
+  const T=CARD_THEMES[theme];
+  ctx.save(); cardRR(ctx,x,y,w,h,36); ctx.clip();
+  const g=ctx.createLinearGradient(0,y,0,y+h); g.addColorStop(0,T.sky[0]); g.addColorStop(0.55,T.sky[1]); g.addColorStop(1,T.sky[2]);
+  ctx.fillStyle=g; ctx.fillRect(x,y,w,h);
+  const base=y+h;
+  const glow=(cx,cy,r,c)=>{const rg=ctx.createRadialGradient(cx,cy,0,cx,cy,r);rg.addColorStop(0,c);rg.addColorStop(1,'rgba(255,255,255,0)');ctx.fillStyle=rg;ctx.beginPath();ctx.arc(cx,cy,r,0,7);ctx.fill();};
+  if(theme==='beach'){
+    glow(x+w*0.68,y+h*0.52,260,'rgba(255,240,180,.9)');
+    ctx.fillStyle='#fff3c4'; ctx.beginPath(); ctx.arc(x+w*0.68,y+h*0.52,70,0,7); ctx.fill();
+    const sea=ctx.createLinearGradient(0,y+h*0.55,0,base); sea.addColorStop(0,'#2bb3c0'); sea.addColorStop(1,'#0b4f73');
+    ctx.fillStyle=sea; ctx.fillRect(x,y+h*0.55,w,h*0.45);
+    for(let r=0;r<5;r++){ctx.strokeStyle='rgba(255,255,255,'+(0.35-r*0.05)+')';ctx.lineWidth=4;ctx.beginPath();for(let i=0;i<=w;i+=8){const yy=y+h*0.6+r*38+Math.sin((i+r*40)/38)*7;i?ctx.lineTo(x+i,yy):ctx.moveTo(x+i,yy);}ctx.stroke();}
+    ctx.fillStyle='#f3d9a4'; ctx.beginPath(); ctx.moveTo(x,base); ctx.quadraticCurveTo(x+w*0.35,base-130,x+w,base-40); ctx.lineTo(x+w,base); ctx.fill();
+    ctx.strokeStyle='#3b2a24'; ctx.lineWidth=14; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(x+110,base-60); ctx.quadraticCurveTo(x+150,base-230,x+120,base-340); ctx.stroke();
+    ctx.strokeStyle='#1f5f3a'; ctx.lineWidth=12;
+    [[-120,-30],[-70,-90],[0,-110],[80,-80],[120,-20]].forEach(([dx,dy])=>{ctx.beginPath();ctx.moveTo(x+120,base-340);ctx.quadraticCurveTo(x+120+dx*0.6,base-340+dy-40,x+120+dx*1.3,base-340+dy+60);ctx.stroke();});
+  } else if(theme==='mountain'){
+    glow(x+w*0.25,y+h*0.28,200,'rgba(255,255,255,.8)');
+    const ranges=[['#6f8fc9',0.55,0.35],['#445f9e',0.7,0.5],['#25345f',0.85,0.7]];
+    ranges.forEach(([c,top,amp],ri)=>{
+      ctx.fillStyle=c; ctx.beginPath(); ctx.moveTo(x,base);
+      let px=x; while(px<x+w+120){const peak=y+h*top-rand()*h*amp*0.5; ctx.lineTo(px+60,peak); ctx.lineTo(px+130,y+h*(top+0.12)); px+=130;}
+      ctx.lineTo(x+w,base); ctx.closePath(); ctx.fill();
+    });
+    ctx.fillStyle='rgba(255,255,255,.85)';
+    for(let i=0;i<4;i++){const cx=x+120+i*230+rand()*40,cy=y+h*0.38+rand()*80;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(cx-45,cy+70);ctx.lineTo(cx-10,cy+55);ctx.lineTo(cx+10,cy+75);ctx.lineTo(cx+45,cy+68);ctx.closePath();ctx.fill();}
+  } else if(theme==='city'){
+    for(let i=0;i<60;i++){ctx.fillStyle='rgba(255,255,255,'+(0.3+rand()*0.6)+')';ctx.fillRect(x+rand()*w,y+rand()*h*0.45,3,3);}
+    glow(x+w*0.5,y+h*0.62,380,'rgba(255,120,160,.45)');
+    let bx=x-20;
+    while(bx<x+w){const bw=60+rand()*70,bh=160+rand()*300;const c=rand()>0.5?'#1a1440':'#2a1c5a';ctx.fillStyle=c;ctx.fillRect(bx,base-bh,bw,bh);
+      ctx.fillStyle='rgba(255,214,120,.85)';
+      for(let wy=base-bh+18;wy<base-20;wy+=28)for(let wx=bx+10;wx<bx+bw-14;wx+=20)if(rand()>0.55)ctx.fillRect(wx,wy,8,12);
+      bx+=bw+6;}
+  } else if(theme==='desert'){
+    glow(x+w*0.7,y+h*0.35,300,'rgba(255,250,200,.9)');
+    ctx.fillStyle='#fff6cf'; ctx.beginPath(); ctx.arc(x+w*0.7,y+h*0.35,85,0,7); ctx.fill();
+    [['#e9a15a',0.62],['#cc7a3e',0.74],['#8f4b2e',0.86]].forEach(([c,t],ri)=>{
+      ctx.fillStyle=c; ctx.beginPath(); ctx.moveTo(x,base);
+      for(let i=0;i<=w;i+=10){ctx.lineTo(x+i,y+h*t+Math.sin(i/(150-ri*20)+ri*2)*(50-ri*8));}
+      ctx.lineTo(x+w,base); ctx.closePath(); ctx.fill();
+    });
+  } else if(theme==='forest'){
+    glow(x+w*0.5,y+h*0.3,330,'rgba(255,255,230,.7)');
+    [['#3f8f5d',0.55],['#2a6e49',0.68],['#134e3a',0.82]].forEach(([c,t],ri)=>{
+      ctx.fillStyle=c; let tx=x-20+ri*20;
+      while(tx<x+w+40){const th=170+rand()*150+ri*30,tw=70+rand()*30,ty=y+h*t+40;
+        ctx.beginPath(); ctx.moveTo(tx,ty-th); ctx.lineTo(tx-tw/2,ty); ctx.lineTo(tx+tw/2,ty); ctx.closePath(); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(tx,ty-th*0.75); ctx.lineTo(tx-tw*0.65,ty-th*0.15); ctx.lineTo(tx+tw*0.65,ty-th*0.15); ctx.closePath(); ctx.fill();
+        tx+=tw*0.75+rand()*26;}
+      ctx.fillRect(x,y+h*t+40,w,base);
+      glow(x+w*0.5,y+h*t+20,300,'rgba(255,255,255,.12)');
+    });
+  } else if(theme==='heritage'){
+    glow(x+w*0.5,y+h*0.45,340,'rgba(255,240,190,.85)');
+    ctx.fillStyle='#4a1f3d';
+    const cx=x+w/2, gy=base-110;
+    ctx.fillRect(cx-210,gy-250,420,250);
+    ctx.beginPath(); ctx.arc(cx,gy-250,150,Math.PI,0); ctx.fill();
+    ctx.fillRect(cx-6,gy-470,12,70);
+    ctx.beginPath(); ctx.arc(cx,gy-400,22,0,7); ctx.fill();
+    [[-300,-330],[300,-330]].forEach(([dx,top])=>{ctx.fillRect(cx+dx-26,gy+top,52,-top);ctx.beginPath();ctx.arc(cx+dx,gy+top,34,Math.PI,0);ctx.fill();ctx.fillRect(cx+dx-3,gy+top-70,6,40);});
+    ctx.fillStyle='#f2b868'; cardRR(ctx,cx-62,gy-180,124,180,62); ctx.fill();
+    ctx.fillStyle='#331430'; ctx.fillRect(x,base-110,w,110);
+    ctx.fillStyle='rgba(255,230,170,.35)'; ctx.fillRect(x,base-114,w,4);
+  } else {
+    glow(x+w/2,y+h/2,420,'rgba(200,247,212,.35)');
+    ctx.strokeStyle='rgba(200,247,212,.35)'; ctx.lineWidth=3;
+    for(let r=80;r<=420;r+=70){ctx.beginPath();ctx.arc(x+w/2,y+h/2,r,0,7);ctx.stroke();}
+    ctx.fillStyle='rgba(200,247,212,.9)';
+    const cx=x+w/2,cy=y+h/2;
+    ctx.beginPath();ctx.moveTo(cx,cy-230);ctx.lineTo(cx+46,cy);ctx.lineTo(cx,cy+230);ctx.lineTo(cx-46,cy);ctx.closePath();ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,.55)';
+    ctx.beginPath();ctx.moveTo(cx-190,cy);ctx.lineTo(cx,cy-40);ctx.lineTo(cx+190,cy);ctx.lineTo(cx,cy+40);ctx.closePath();ctx.fill();
+  }
+  ctx.restore();
+}
+async function drawTripCard(canvas,trip,activities,opts){
+  opts=opts||{};
+  const W=1080,H=1350, ctx=canvas.getContext('2d');
+  try{ await Promise.all([document.fonts.load('700 80px Poppins'),document.fonts.load('500 30px Poppins'),document.fonts.load('600 30px Poppins')]); }catch(e){}
+  const theme=opts.theme||detectCardTheme(trip,activities), T=CARD_THEMES[theme];
+  const rand=seededRand(hashStr((trip.destination||'')+theme));
+  const rarity=cardRarity(trip,activities);
+  ctx.clearRect(0,0,W,H);
+  // outer foil frame
+  const fr=ctx.createLinearGradient(0,0,W,H);
+  ['#ff8a8a','#ffd36e','#8affc1','#6ec8ff','#c58bff','#ff8a8a'].forEach((c,i,a)=>fr.addColorStop(i/(a.length-1),c));
+  ctx.fillStyle=fr; cardRR(ctx,0,0,W,H,56); ctx.fill();
+  ctx.fillStyle='#10201a'; cardRR(ctx,16,16,W-32,H-32,44); ctx.fill();
+  const body=ctx.createLinearGradient(0,0,0,H); body.addColorStop(0,'#16342a'); body.addColorStop(1,'#0c1a15');
+  ctx.fillStyle=body; cardRR(ctx,16,16,W-32,H-32,44); ctx.fill();
+  // header
+  ctx.textBaseline='alphabetic';
+  ctx.font='700 30px Poppins, sans-serif';
+  const pillW=ctx.measureText(rarity.name).width+56;
+  ctx.fillStyle=rarity.color; cardRR(ctx,64,66,pillW,52,26); ctx.fill();
+  ctx.fillStyle='#10201a'; ctx.textAlign='left'; ctx.fillText(rarity.name,92,103);
+  ctx.textAlign='right'; ctx.fillStyle=T.accent; ctx.font='700 30px Poppins, sans-serif';
+  ctx.fillText('COMPASS',W-64,103);
+  // art window
+  const ax=64,ay=140,aw=W-128,ah=640;
+  if(opts.photo){
+    ctx.save(); cardRR(ctx,ax,ay,aw,ah,36); ctx.clip();
+    const iw=opts.photo.width||opts.photo.naturalWidth, ih=opts.photo.height||opts.photo.naturalHeight;
+    const sc=Math.max(aw/iw,ah/ih), dw=iw*sc, dh=ih*sc;
+    ctx.drawImage(opts.photo,ax+(aw-dw)/2,ay+(ah-dh)/2,dw,dh);
+    ctx.restore();
+  } else cardMotif(ctx,theme,ax,ay,aw,ah,rand);
+  // art shade + date pill
+  const sh=ctx.createLinearGradient(0,ay+ah-200,0,ay+ah); sh.addColorStop(0,'rgba(0,0,0,0)'); sh.addColorStop(1,'rgba(0,0,0,.55)');
+  ctx.save(); cardRR(ctx,ax,ay,aw,ah,36); ctx.clip(); ctx.fillStyle=sh; ctx.fillRect(ax,ay+ah-200,aw,200); ctx.restore();
+  const dateTxt=(trip.startDate&&!trip.tentative)?(trip.endDate?fmtDate(trip.startDate)+' – '+fmtDateFull(trip.endDate):fmtDateFull(trip.startDate)):'Dates to be confirmed';
+  ctx.font='600 34px Poppins, sans-serif'; ctx.textAlign='left';
+  ctx.fillStyle='#fff'; ctx.fillText(dateTxt,ax+36,ay+ah-36);
+  ctx.strokeStyle='rgba(255,255,255,.7)'; ctx.lineWidth=3; cardRR(ctx,ax,ay,aw,ah,36); ctx.stroke();
+  // name plate
+  const name=(trip.destination||'Untitled').toUpperCase();
+  ctx.textAlign='left'; ctx.fillStyle='#fff';
+  cardFit(ctx,name,W-128,104,48,800);
+  ctx.fillText(name,64,ay+ah+118);
+  const flights=activities.filter(a=>a.type==='flight').sort((a,b)=>((a.date||'')+(a.time||'')).localeCompare((b.date||'')+(b.time||'')));
+  const stays=activities.filter(a=>a.type==='stay').length;
+  const plans=activities.filter(a=>a.type==='activity').length;
+  const days=(trip.startDate&&trip.endDate)?daysBetween(trip.endDate,trip.startDate)+1:(trip.startDate?1:0);
+  ctx.font='500 32px Poppins, sans-serif'; ctx.fillStyle=T.accent;
+  ctx.fillText((trip.tripType==='international'?'INTERNATIONAL':'DOMESTIC')+(trip.purpose?'  ·  '+String(trip.purpose).toUpperCase():''),64,ay+ah+168);
+  // route
+  let routeLine='';
+  if(flights.length){
+    const f0=flights[0], fl=flights[flights.length-1];
+    const nm=(city,code)=>city||code||'?';
+    routeLine=nm(f0.fromCity,f0.from)+'  →  '+nm(f0.toCity,f0.to);
+    if(flights.length>1 && fl!==f0) routeLine+='   +'+(flights.length-1)+' more';
+  }
+  const st=tripStatus(trip);
+  let statusLine='Dates to be confirmed';
+  if(st==='planned'){const n=daysBetween(trip.startDate,todayStr());statusLine=n===1?'Tomorrow':'In '+n+' days';}
+  else if(st==='active') statusLine='Happening now';
+  else if(st==='past') statusLine='Completed';
+  const firstPlan=activities.filter(a=>a.type==='activity'&&a.title).sort((a,b)=>(a.date||'9999').localeCompare(b.date||'9999'))[0];
+  const rows=[];
+  if(routeLine) rows.push(routeLine);
+  rows.push(statusLine);
+  if(rows.length<2 && firstPlan) rows.push('Plan: '+firstPlan.title);
+  rows.slice(0,2).forEach((txt,i)=>{
+    const ry=ay+ah+196+i*76;
+    ctx.fillStyle='rgba(255,255,255,.08)'; cardRR(ctx,64,ry,W-128,64,20); ctx.fill();
+    ctx.textAlign='left'; ctx.fillStyle=(txt===statusLine)?T.accent:'#fff';
+    cardFit(ctx,txt,W-128-48,32,20,600); ctx.fillText(txt,88,ry+42);
+  });
+  // stats
+  const sy=1176, sw=(W-128-3*16)/4;
+  [['DAYS',days||'-'],['FLIGHTS',flights.length],['STAYS',stays],['PLANS',plans]].forEach(([lab,val],i)=>{
+    const sx=64+i*(sw+16);
+    ctx.fillStyle='rgba(255,255,255,.08)'; cardRR(ctx,sx,sy,sw,92,20); ctx.fill();
+    ctx.textAlign='center'; ctx.fillStyle='#fff'; ctx.font='700 42px Poppins, sans-serif'; ctx.fillText(String(val),sx+sw/2,sy+50);
+    ctx.fillStyle=T.accent; ctx.font='600 18px Poppins, sans-serif'; ctx.fillText(lab,sx+sw/2,sy+78);
+  });
+  // footer
+  ctx.textAlign='left'; ctx.fillStyle='rgba(255,255,255,.6)'; ctx.font='500 22px Poppins, sans-serif';
+  const no=String(opts.index||1).padStart(2,'0')+' / '+String(opts.total||1).padStart(2,'0');
+  ctx.fillText('TRIP No. '+no,64,1300);
+  ctx.textAlign='right'; ctx.fillText('Made with Compass',W-64,1300);
+  // foil sheen + sparkles
+  ctx.save(); cardRR(ctx,0,0,W,H,56); ctx.clip();
+  const sheen=ctx.createLinearGradient(0,H*0.1,W,H*0.9);
+  sheen.addColorStop(0,'rgba(255,255,255,0)'); sheen.addColorStop(0.42,'rgba(255,255,255,0)');
+  sheen.addColorStop(0.5,'rgba(255,255,255,.16)'); sheen.addColorStop(0.58,'rgba(255,255,255,0)'); sheen.addColorStop(1,'rgba(255,255,255,0)');
+  ctx.fillStyle=sheen; ctx.fillRect(0,0,W,H);
+  const holo=ctx.createLinearGradient(0,0,W,H);
+  ['rgba(255,120,120,.07)','rgba(255,220,120,.07)','rgba(120,255,190,.07)','rgba(120,200,255,.07)','rgba(200,140,255,.07)'].forEach((c,i,a)=>holo.addColorStop(i/(a.length-1),c));
+  ctx.fillStyle=holo; ctx.fillRect(0,0,W,H);
+  const sr=seededRand(hashStr('spark'+(trip.destination||'')));
+  for(let i=0;i<14;i++){const sx=sr()*W, sy2=sr()*H, r=6+sr()*12; ctx.fillStyle='rgba(255,255,255,.75)';
+    ctx.beginPath();ctx.moveTo(sx,sy2-r);ctx.quadraticCurveTo(sx,sy2,sx+r,sy2);ctx.quadraticCurveTo(sx,sy2,sx,sy2+r);ctx.quadraticCurveTo(sx,sy2,sx-r,sy2);ctx.quadraticCurveTo(sx,sy2,sx,sy2-r);ctx.fill();}
+  ctx.restore();
+  return theme;
+}
+let cardState=null;
+async function renderShareCard(){
+  const c=document.getElementById('share-canvas'); if(!c||!cardState) return;
+  await drawTripCard(c,cardState.trip,cardState.activities,{theme:cardState.theme,photo:cardState.photo,index:cardState.index,total:cardState.total});
+  CARD_THEME_ORDER.forEach(k=>{const el=document.getElementById('theme-'+k); if(el) el.classList.toggle('active',k===cardState.theme);});
+  const note=document.getElementById('card-theme-note');
+  if(note) note.textContent=cardState.photo?'Using your photo.':(detectCardTheme(cardState.trip,cardState.activities)==='compass'&&cardState.theme==='compass'?'Couldn\u2019t match this destination to a theme, so it uses Classic. Pick one above.':'Theme guessed from the destination name. Pick another if it\u2019s wrong.');
+}
+function setCardTheme(k){ if(!cardState) return; cardState.theme=k; cardState.photo=null; renderShareCard(); }
+async function setCardPhoto(file){
+  if(!file||!cardState) return;
+  try{
+    const bmp=await createImageBitmap(file);
+    cardState.photo=bmp; renderShareCard();
+  }catch(e){ toast('Couldn’t read that image'); }
+}
+function cardFileName(){ return 'compass-'+((cardState&&cardState.trip.destination)||'trip').replace(/[^a-z0-9]+/gi,'-').toLowerCase()+'.png'; }
+function cardBlob(){ return new Promise(res=>document.getElementById('share-canvas').toBlob(res,'image/png')); }
+async function shareCardImage(){
+  const blob=await cardBlob(); if(!blob){toast('Couldn’t build the image');return;}
+  const file=new File([blob],cardFileName(),{type:'image/png'});
+  if(navigator.canShare && navigator.canShare({files:[file]})){
+    try{ await navigator.share({files:[file],title:(cardState.trip.destination||'Trip')}); }
+    catch(e){ if(e&&e.name!=='AbortError') toast('Couldn’t open the share sheet — try Save'); }
+  } else { saveCardImage(); }
+}
+async function saveCardImage(){
+  const blob=await cardBlob(); if(!blob) return;
+  const url=URL.createObjectURL(blob), a=document.createElement('a');
+  a.href=url; a.download=cardFileName(); a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),2000);
+  toast('Image saved');
+}
+function showShareTab(which){
+  document.getElementById('share-pane-card').classList.toggle('hidden',which!=='card');
+  document.getElementById('share-pane-text').classList.toggle('hidden',which!=='text');
+  document.getElementById('tab-card').classList.toggle('active',which==='card');
+  document.getElementById('tab-text').classList.toggle('active',which==='text');
+}
+async function openShareCard(tripId){
+  const trip=await idGet('trips',tripId);
+  const activities=await idAll('activities',tripId);
+  const allTrips=(await idAll('trips')).sort((a,b)=>((a.startDate||'9999')+a.id).localeCompare((b.startDate||'9999')+b.id));
+  cardState={trip,activities,theme:detectCardTheme(trip,activities),photo:null,index:allTrips.findIndex(t=>t.id===tripId)+1,total:allTrips.length};
+  const text=buildShareText(trip,activities,{refs:true});
+  const canShare=typeof navigator!=='undefined' && typeof navigator.share==='function';
+  openSheet(`
+    <h3>${ICONS.share} Share trip</h3>
+    <div class="filter-row">
+      <button class="chip active" id="tab-card" onclick="showShareTab('card')">Card</button>
+      <button class="chip" id="tab-text" onclick="showShareTab('text')">Text and safety</button>
+    </div>
+    <div id="share-pane-card">
+      <canvas id="share-canvas" width="1080" height="1350" style="width:100%;height:auto;border-radius:18px;display:block;margin-bottom:10px;"></canvas>
+      <div class="filter-row" id="theme-chips">
+        ${CARD_THEME_ORDER.map(k=>`<button class="chip" id="theme-${k}" onclick="setCardTheme('${k}')">${CARD_THEMES[k].label}</button>`).join('')}
+      </div>
+      <div class="sheet-actions" style="flex-wrap:wrap;">
+        <button class="btn primary" onclick="shareCardImage()">Share image</button>
+        <button class="btn ghost" onclick="saveCardImage()">Save</button>
+        <label class="btn ghost" style="cursor:pointer;">Use my photo<input type="file" accept="image/*" style="display:none" onchange="setCardPhoto(this.files[0])"></label>
+      </div>
+      <div class="t2" id="card-theme-note"></div>
+      <div class="t2">The card shows destination, dates, route and counts only. No booking references or addresses, so it's safe to post. <span class="nudge-link" style="text-decoration:underline;cursor:pointer;" onclick="openLimitsSheet()">Limits</span></div>
+    </div>
+    <div id="share-pane-text" class="hidden">
+    <div class="t2" style="margin-bottom:10px;">Itinerary and stay addresses as plain text, ready for WhatsApp or anyone you trust. Edit before sending.</div>
+    <label class="t2" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;"><input type="checkbox" id="f-share-refs" checked onchange="refreshShareText('${tripId}')"> Include PNRs and booking references</label>
+    <div class="field"><textarea id="f-share-text" style="min-height:220px;font-size:13px;">${esc(text)}</textarea></div>
+    <div class="sheet-actions" style="flex-wrap:wrap;">
+      ${canShare?`<button class="btn primary" onclick="shareTripCard()">Share</button>`:''}
+      <button class="btn ${canShare?'ghost':'primary'}" onclick="shareTripWhatsApp()">WhatsApp</button>
+      <button class="btn ghost" onclick="copyTripCard()">Copy</button>
+    </div>
+    <div style="border-top:1px solid var(--line,rgba(255,255,255,.1));margin-top:16px;padding-top:14px;">
+      <div style="font-weight:600;margin-bottom:4px;">Daily check-in reminder</div>
+      <div class="t2" style="margin-bottom:10px;">Adds a calendar reminder for each trip day. It nudges <em>you</em> to message someone; Compass can't alert them if you don't, as there's no server.</div>
+      <div class="field"><input id="f-checkin-contact" placeholder="Who do you check in with? (optional)"></div>
+      <div class="field"><input id="f-checkin-time" type="time" value="21:00"></div>
+      <button class="btn ghost" onclick="downloadCheckinICS('${tripId}')">Add reminders to calendar</button>
+    </div>
+    </div>
+    <div class="sheet-actions"><button class="btn ghost" onclick="closeSheet()">Close</button></div>`);
+  renderShareCard();
+}
+async function refreshShareText(tripId){
+  const trip=await idGet('trips',tripId);
+  const activities=await idAll('activities',tripId);
+  const refs=document.getElementById('f-share-refs').checked;
+  document.getElementById('f-share-text').value=buildShareText(trip,activities,{refs});
+}
+function currentShareText(){return (document.getElementById('f-share-text').value||'').trim();}
+async function shareTripCard(){
+  const text=currentShareText();
+  try{ await navigator.share({text}); }
+  catch(e){ if(e&&e.name!=='AbortError') toast('Couldn’t open the share sheet — try Copy'); }
+}
+function shareTripWhatsApp(){
+  window.open('https://wa.me/?text='+encodeURIComponent(currentShareText()),'_blank');
+}
+async function copyTripCard(){
+  const text=currentShareText();
+  try{ await navigator.clipboard.writeText(text); toast('Copied'); }
+  catch(e){
+    const ta=document.getElementById('f-share-text'); ta.select();
+    toast('Select all and copy manually');
+  }
+}
+async function downloadCheckinICS(tripId){
+  const trip=await idGet('trips',tripId);
+  if(!trip.startDate){ toast('Set trip dates first'); return; }
+  const time=document.getElementById('f-checkin-time').value||'21:00';
+  const contact=document.getElementById('f-checkin-contact').value;
+  const ics=buildCheckinICS(trip,time,contact);
+  downloadICS(ics,(trip.destination||'trip').replace(/[^a-z0-9]+/gi,'-').toLowerCase()+'-checkins.ics');
+}
+
+/* ---------------- Import a booking (paste / share-sheet shortcut) ---------------- */
+let importParsed=null, importFile=null;
+function daysBetween(a,b){return Math.round((new Date(a+'T00:00:00')-new Date(b+'T00:00:00'))/86400000);}
+function suggestTripForBooking(parsed,trips,preferId){
+  const d=parsed.date||parsed.checkIn;
+  if(d){
+    let best=null,bestGap=Infinity;
+    trips.forEach(t=>{
+      if(!t.startDate) return;
+      const end=t.endDate||t.startDate;
+      const gap=d<t.startDate?daysBetween(t.startDate,d):d>end?daysBetween(d,end):0;
+      if(gap<=3 && gap<bestGap){best=t;bestGap=gap;}
+    });
+    if(best) return best.id;
+  }
+  return trips.some(t=>t.id===preferId)?preferId:null;
+}
+function importTitle(parsed){
+  if(parsed.type==='flight') return 'Flight to '+(parsed.toCity||parsed.to||'destination');
+  if(parsed.type==='train') return 'Train to '+(parsed.to||'destination');
+  if(parsed.type==='stay') return parsed.title||'Stay';
+  return 'Booking';
+}
+function buildActivityFromParsed(parsed,tripId){
+  const a={id:uid(),tripId,type:parsed.type,title:importTitle(parsed),
+    date:parsed.date||parsed.checkIn||'',time:parsed.time||'',notes:'Imported from pasted booking'};
+  const flags=importFlagsFor(parsed); if(flags.length) a.importFlags=flags;
+  if(parsed.type==='flight'){
+    ['airline','pnr','from','to','fromCity','toCity','flightNumber'].forEach(k=>{if(parsed[k])a[k]=parsed[k];});
+  } else if(parsed.type==='train'){
+    ['from','to','trainNumber','seatNumbers','trainName','trainClass','quota','pnr'].forEach(k=>{if(parsed[k])a[k]=parsed[k];});
+    const rn=railNotes(parsed); if(rn) a.notes=rn;
+    if(parsed.trainName) a.title=parsed.trainName+(parsed.to?' to '+String(parsed.to).replace(/\s*\(.*$/,''):'');
+  } else if(parsed.type==='stay'){
+    ['location','checkIn','checkOut'].forEach(k=>{if(parsed[k])a[k]=parsed[k];});
+  }
+  return a;
+}
+function findDuplicateActivity(parsed,activities){
+  return activities.find(a=>a.type===parsed.type && (
+    (parsed.pnr && a.pnr===parsed.pnr) ||
+    (parsed.flightNumber && a.flightNumber===parsed.flightNumber && a.date===parsed.date) ||
+    (parsed.trainNumber && a.trainNumber===parsed.trainNumber && a.date===parsed.date)
+  ))||null;
+}
+function parseBookingLegs(text){
+  const whole=parseBookingText(text);
+  if(whole.type!=='flight'||!REF) return [whole];
+  const re=/(?<![A-Za-z0-9])([A-Z0-9]{2})\s?(\d{2,4})(?![A-Za-z0-9])/g;
+  const head=text.slice(0,6000), hits=[]; let m;
+  while((m=re.exec(head))){
+    if(!/[A-Z]/.test(m[1])||/^(19|20)\d\d$/.test(m[2])||!airlineByCode(m[1])) continue;
+    const key=m[1]+m[2];
+    if(hits.some(h=>h.key===key)) continue;
+    hits.push({key,index:m.index});
+  }
+  if(hits.length<2) return [whole];
+  const legs=hits.map((h,i)=>{
+    const seg=text.slice(h.index,i+1<hits.length?hits[i+1].index:text.length);
+    const pl=parseBookingText(seg);
+    if(!pl.pnr&&whole.pnr) pl.pnr=whole.pnr;
+    return pl;
+  }).filter(pl=>pl.type==='flight'&&pl.from&&pl.to);
+  return legs.length>=2?legs:[whole];
+}
+function hasUsefulFields(p){
+  if(!p||!p.type) return false;
+  if(p.type==='flight') return !!(p.flightNumber||p.from||p.to||p.pnr);
+  if(p.type==='train') return !!(p.trainNumber||p.from||p.to||p.pnr);
+  if(p.type==='stay') return !!(p.checkIn||p.checkOut||p.location);
+  return false;
+}
+let importLegs=[];
+function importSummaryHTML(parsed){
+  const lines=[];
+  if(parsed.type==='flight'){
+    lines.push(['Flight',[parsed.flightNumber,parsed.airline].filter(Boolean).join(' \u00b7 ')||'\u2014']);
+    lines.push(['Route',routeLabel(parsed)]);
+    lines.push(['When',[parsed.date?fmtDateFull(parsed.date):'date not found',parsed.time].filter(Boolean).join(' ')]);
+    if(parsed.pnr) lines.push(['PNR',parsed.pnr]);
+  } else if(parsed.type==='train'){
+    lines.push(['Train',[parsed.trainNumber,parsed.trainName].filter(Boolean).join(' \u00b7 ')||'\u2014']);
+    lines.push(['Route',(parsed.from||'?')+' \u2192 '+(parsed.to||'?')]);
+    if(parsed.trainClass) lines.push(['Class',(RAIL_CLASSES[parsed.trainClass]||parsed.trainClass)+(parsed.quota?' \u00b7 '+(RAIL_QUOTAS[parsed.quota]||parsed.quota):'')]);
+    if(parsed.pnr) lines.push(['PNR',parsed.pnr]);
+    lines.push(['When',[parsed.date?fmtDateFull(parsed.date):'date not found',parsed.time].filter(Boolean).join(' ')]);
+    if(parsed.seatNumbers) lines.push(['Seat',parsed.seatNumbers+(parsed.bookingStatus&&parsed.bookingStatus!=='CNF'?' ('+parsed.bookingStatus+')':'')]);
+    if(parsed.fare) lines.push(['Fare','\u20b9'+fmtINR(parsed.fare)]);
+    if(parsed.dbRoute) lines.push(['Runs',parsed.dbRoute]);
+  } else {
+    lines.push(['Stay',parsed.title||'\u2014']);
+    lines.push(['Dates',(parsed.checkIn?fmtDateFull(parsed.checkIn):'?')+' \u2192 '+(parsed.checkOut?fmtDateFull(parsed.checkOut):'?')]);
+    if(parsed.location) lines.push(['Address',parsed.location]);
+  }
+  return `<div class="board" style="padding:12px;margin-bottom:10px;">${lines.map(l=>`<div class="t2"><b>${esc(l[0])}</b> &nbsp;${esc(l[1])}</div>`).join('')}</div>`;
+}
+async function openImportSheet(tripId,prefill,fromClipboard){
+  importParsed=null; importFile=null; importSource='text';
+  openSheet(`
+    <h3>${ICONS.file} Import a booking</h3>
+    <div class="t2" style="margin-bottom:10px;">Paste an email or ticket text, or attach a PDF or screenshot. You review before anything is saved.</div>
+    <input type="hidden" id="f-import-trip" value="${esc(tripId||'')}">
+    <div class="field"><textarea id="f-import-text" style="min-height:140px;font-size:13px;" placeholder="Paste booking confirmation text here">${esc(prefill||'')}</textarea></div>
+    <div class="sheet-actions" style="flex-wrap:wrap;">
+      <button class="btn ghost" onclick="importFromClipboard()">Paste from clipboard</button>
+      <label class="btn ghost" style="cursor:pointer;">Attach PDF/image<input type="file" accept="application/pdf,image/*" style="display:none" onchange="importFromFile(this.files[0])"></label>
+      <button class="btn primary" onclick="runImportParse()">Read it</button>
+    </div>
+    <div id="import-status" class="t2" style="margin:8px 0;"></div>
+    <div id="import-result"></div>
+    <div style="margin-top:12px;display:flex;gap:16px;flex-wrap:wrap;"><span class="add" onclick="openShortcutSetup()">Set up sharing from Mail and WhatsApp</span><span class="add" onclick="openLimitsSheet()">Limits</span></div>
+    <div class="sheet-actions"><button class="btn ghost" onclick="closeSheet()">Close</button></div>`);
+  if(prefill) runImportParse();
+}
+async function importFromClipboard(){
+  try{
+    const t=await navigator.clipboard.readText();
+    if(!t||!t.trim()){toast('Clipboard is empty');return;}
+    document.getElementById('f-import-text').value=t;
+    runImportParse();
+  }catch(e){ toast('Couldn’t read the clipboard — paste into the box instead'); }
+}
+async function importFromFile(file){
+  if(!file) return;
+  const status=document.getElementById('import-status');
+  try{
+    status.textContent='Reading file…';
+    const text=file.type==='application/pdf'?await extractPdfText(file):await extractImageText(file,pct=>{status.textContent='Reading image (OCR)… '+pct+'%';});
+    importFile=file; importSource=file.type==='application/pdf'?'pdf':'image';
+    document.getElementById('f-import-text').value=text;
+    runImportParse();
+  }catch(e){ status.textContent='Couldn’t read that file. Paste the text instead.'; }
+}
+async function runImportParse(){
+  const text=(document.getElementById('f-import-text').value||'').trim();
+  const status=document.getElementById('import-status'), out=document.getElementById('import-result');
+  if(!text){toast('Paste something first');return;}
+  await loadBookingData();
+  const legs=parseBookingLegs(text).filter(hasUsefulFields);
+  if(!legs.length){ importParsed=null; importLegs=[]; out.innerHTML=''; status.textContent='Couldn\u2019t recognise a flight, train or stay in that text.'; return; }
+  importLegs=legs; importParsed=legs[0]; status.textContent='';
+  const trips=await idAll('trips');
+  const preferId=document.getElementById('f-import-trip').value;
+  const suggested=suggestTripForBooking(legs[0],trips,preferId);
+  out.innerHTML=(legs.length>1?`<div class="t2" style="margin-bottom:6px;">Found ${legs.length} flights in this booking.</div>`:'')+
+    legs.map(l=>importSummaryHTML(l)+importWarningsHTML(l)).join('')+
+    `<div class="t2" style="margin:-4px 0 10px;color:var(--muted)">Check these before adding. Fields I couldn\u2019t find are left blank.</div>
+    ${(legs.length===1&&legs[0].fare)?`<label class="t2" style="display:flex;align-items:center;gap:8px;margin-bottom:10px;"><input type="checkbox" id="f-import-fare" checked> Also log \u20b9${fmtINR(legs[0].fare)} as a transport expense</label>`:''}
+    <div class="field"><label>Add to trip</label><select id="f-import-target">
+      <option value="">Choose a trip\u2026</option>
+      ${trips.map(t=>`<option value="${t.id}" ${t.id===suggested?'selected':''}>${esc(t.destination)} (${esc(tripDateLabel(t))})</option>`).join('')}
+    </select>${suggested&&suggested!==preferId?'<div class="t2">Suggested from the booking date.</div>':''}</div>
+    <div class="sheet-actions"><button class="btn primary" onclick="confirmImport()">${legs.length>1?'Add all '+legs.length+' to trip':'Add to trip'}</button></div>`;
+}
+async function confirmImport(){
+  if(!importLegs.length){return;}
+  const tripId=document.getElementById('f-import-target').value;
+  if(!tripId){toast('Choose a trip first');return;}
+  const existing=await idAll('activities',tripId);
+  let added=0;
+  for(const leg of importLegs){
+    const dup=findDuplicateActivity(leg,existing);
+    if(dup && !confirm('This looks like "'+dup.title+'", which is already in this trip. Add it again?')) continue;
+    const a=buildActivityFromParsed(leg,tripId);
+    if(importFile && importLegs.length===1) a.ticketFile=importFile;
+    const fareBox=document.getElementById('f-import-fare');
+    if(fareBox&&fareBox.checked&&leg.fare&&importLegs.length===1){
+      const expId=uid();
+      await idPut('expenses',{id:expId,tripId,amount:leg.fare,currency:'INR',date:leg.date||todayStr(),note:a.title,category:defaultCategoryForType(a.type),activityId:a.id});
+      a.expenseId=expId;
+    }
+    await idPut('activities',a); added++;
+  }
+  closeSheet();
+  if(!added){ toast('Nothing added'); return; }
+  toast(added>1?added+' items added to your trip':'Added to your trip');
+  nav({view:'trip',id:tripId,tab:'activities'});
+}
+async function handleImportParam(){
+  const qp=new URLSearchParams(location.search);
+  const imp=qp.get('import');
+  if(!imp) return;
+  history.replaceState(null,'',location.pathname+location.hash);
+  const tripId=route.view==='trip'?route.id:'';
+  if(imp==='clipboard'){ openImportSheet(tripId,'',true); return; }
+  if(imp==='file'){
+    await openImportSheet(tripId,'');
+    const st=document.getElementById('import-status');
+    if(st) st.textContent='Tap Attach PDF/image and choose the file you just saved.';
+    return;
+  }
+  let text=imp;
+  if(imp.startsWith('b64:')){ try{ text=decodeURIComponent(escape(atob(imp.slice(4).replace(/-/g,'+').replace(/_/g,'/')))); }catch(e){ text=''; } }
+  openImportSheet(tripId,text);
+}
+
+/* ---------------- Share-sheet shortcut setup guide ---------------- */
+function importLink(mode){ return location.origin+location.pathname+'?import='+mode; }
+async function shortcutNudgeHTML(){
+  const dismissed=await idGet('meta','shortcutNudgeDismissed');
+  if(dismissed) return '';
+  return `<div class="backup-nudge">
+    <span>Send bookings from Mail or WhatsApp straight into Compass</span>
+    <span class="nudge-actions">
+      <span class="nudge-link" onclick="openShortcutSetup()">Set up</span>
+      <span class="nudge-link" onclick="dismissShortcutNudge()">Hide</span>
+    </span>
+  </div>`;
+}
+async function dismissShortcutNudge(){
+  await idPut('meta',{key:'shortcutNudgeDismissed',value:true});
+  render();
+}
+async function copyImportLink(mode){
+  try{ await navigator.clipboard.writeText(importLink(mode)); toast('Link copied'); }
+  catch(e){ toast('Couldn’t copy — long-press the link to copy it'); }
+}
+function openShortcutSetup(){
+  const textLink=importLink('clipboard'), fileLink=importLink('file');
+  const step=(n,t)=>`<li style="margin-bottom:4px;">${t}</li>`;
+  openSheet(`
+    <h3>${ICONS.share} Share to Compass</h3>
+    <div class="t2" style="margin-bottom:12px;">iPhone web apps can't appear in the share sheet by themselves, so you add a free Shortcut once. About 3 minutes each. Nothing is sent anywhere: the text goes from your clipboard into Compass on your phone.</div>
+
+    <div style="font-weight:600;margin:10px 0 4px;">1. Text from Mail or WhatsApp</div>
+    <ol class="t2" style="padding-left:18px;line-height:1.55;">
+      ${step(1,'Open the <b>Shortcuts</b> app, tap <b>+</b>, name it <b>Add to Compass</b>.')}
+      ${step(2,'Tap the <b>i</b> icon, turn on <b>Show in Share Sheet</b>, and set it to accept <b>Text</b>.')}
+      ${step(3,'Add the actions <b>Get Text from Input</b>, then <b>Copy to Clipboard</b>.')}
+      ${step(4,'Add <b>Open URLs</b> and paste this link:')}
+    </ol>
+    <div class="t2" style="word-break:break-all;background:var(--panel-2);padding:8px 10px;border-radius:8px;margin:4px 0 6px;">${esc(textLink)}</div>
+    <button class="btn ghost" onclick="copyImportLink('clipboard')">Copy link</button>
+    <div class="t2" style="margin-top:10px;"><b>In Mail:</b> select the booking text, tap Share, choose Add to Compass.<br><b>In WhatsApp:</b> press and hold the message, tap Forward, then the share icon, and choose Add to Compass. Menu names can vary by iOS version.<br>Compass opens, tap <b>Paste from clipboard</b>, check the details, then add to a trip.</div>
+
+    <div style="font-weight:600;margin:18px 0 4px;">2. PDFs and screenshots</div>
+    <div class="t2" style="margin-bottom:6px;">Shortcuts can't hand a file to a web app, so this is a two-step flow: save the file, then attach it in Compass.</div>
+    <ol class="t2" style="padding-left:18px;line-height:1.55;">
+      ${step(1,'Make a second Shortcut named <b>Save to Compass</b> that accepts <b>PDFs</b> and <b>Images</b>.')}
+      ${step(2,'Add <b>Save File</b>. Turn off "Ask Where to Save" and pick a folder called Compass in iCloud Drive.')}
+      ${step(3,'Add <b>Open URLs</b> with this link:')}
+    </ol>
+    <div class="t2" style="word-break:break-all;background:var(--panel-2);padding:8px 10px;border-radius:8px;margin:4px 0 6px;">${esc(fileLink)}</div>
+    <button class="btn ghost" onclick="copyImportLink('file')">Copy link</button>
+    <div class="t2" style="margin-top:10px;">Compass opens the import sheet. Tap <b>Attach PDF/image</b> and choose the file from your Compass folder. It reads the ticket and fills in the details.</div>
+
+    <div class="t2" style="margin-top:14px;">No Shortcut needed for the simplest route: from any email, copy the text and use <b>Paste booking</b> in a trip.</div>
+    <div class="sheet-actions"><button class="btn ghost" onclick="closeSheet()">Close</button></div>`);
+}
+
+/* ---------------- In-app limits and review flags ---------------- */
+let importSource='text';
+function importWarnings(p){
+  const w=[];
+  if(!p.date && !p.checkIn) w.push('No date found. Set it after adding, or the trip will show "no date set".');
+  if(p.type==='flight'){
+    if(!p.from||!p.to) w.push('Route not found.');
+    else if(REF && (!airportInfo(p.from)||!airportInfo(p.to))) w.push('An airport code is not in the airport list, so no city name was added.');
+    if(!p.flightNumber) w.push('Flight number not found.');
+    if(!p.pnr) w.push('PNR not found.');
+    if(!REF) w.push('Airline and airport lookup did not load (it needs internet the first time). Details come from the text only.');
+  }
+  if(p.type==='train'){
+    if(!p.from||!p.to) w.push('Stations not found.');
+    if(!p.pnr) w.push('PNR not found.');
+    const st=p.bookingStatus||'';
+    if(/WL|RAC|REGRET|CAN/.test(st)) w.push('Not a confirmed seat ('+st+'). Seat details can change, so check the final chart.');
+    if(p.irctc && !p.passengerCount) w.push('Could not read the passenger table, so seat numbers may be missing.');
+    if(p.passengerCount>1) w.push('Seats for all '+p.passengerCount+' passengers are saved as one line. Names are never stored.');
+    if(!RAIL) w.push('Station and train lookup did not load (it needs internet the first time). Details come from the text only.');
+    else if(p.trainNotInDb) w.push('This train is not in the built-in list, which is several years old. Name and route come from the ticket only.');
+  }
+  if(p.type==='stay'){
+    if(!p.location) w.push('Address not found.');
+    w.push('Hotel emails vary a lot. Check the dates and address.');
+  }
+  if(importSource==='image') w.push('Read from an image, so numbers like PNR and times may be wrong. Double-check them.');
+  return w;
+}
+function importFlagsFor(p){
+  const f=[];
+  if(!p.date && !p.checkIn) f.push('date');
+  if((p.type==='flight'||p.type==='train') && (!p.from||!p.to)) f.push('route');
+  if(p.type==='flight' && !p.flightNumber) f.push('flight no.');
+  if((p.type==='flight'||p.type==='train') && !p.pnr) f.push('PNR');
+  if(p.type==='train' && /WL|RAC|REGRET|CAN/.test(p.bookingStatus||'')) f.push('seat status');
+  if(p.type==='stay' && !p.location) f.push('address');
+  if(p.type==='stay') f.push('dates');
+  if(importSource==='image') f.push('OCR text');
+  return [...new Set(f)];
+}
+function importWarningsHTML(p){
+  const w=importWarnings(p);
+  if(!w.length) return '';
+  return `<div class="t2" style="background:var(--rust-soft);color:var(--rose);padding:10px 12px;border-radius:10px;margin:-2px 0 10px;line-height:1.5;"><b>Check before adding</b><ul style="margin:4px 0 0;padding-left:18px;">${w.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul></div>`;
+}
+function openLimitsSheet(){
+  const sec=(t,items)=>`<div style="font-weight:600;margin:14px 0 4px;">${t}</div><ul class="t2" style="padding-left:18px;line-height:1.55;margin:0;">${items.map(i=>'<li>'+i+'</li>').join('')}</ul>`;
+  openSheet(`
+    <h3>${ICONS.file} What Compass can and can't do</h3>
+    <div class="t2">Honest limits, so nothing surprises you on a trip.</div>
+    ${sec('Reading tickets',[
+      'It reads text from PDFs and, less reliably, from photos (OCR). Always check the review screen before adding.',
+      'Layouts differ between airlines, IRCTC versions and hotel sites. Fields it can’t find are left blank and flagged.',
+      'Round trips are split only when each flight number appears in the text.',
+      'Text with only city names and no airport codes still needs manual entry.',
+      'Passenger names are never saved. Seats for several passengers are kept as one line.'
+    ])}
+    ${sec('Airline, airport and train data',[
+      'These are fixed snapshots, not live data. Airlines can merge or shut down, and codes can be reused.',
+      'The train list is several years old and holds only each train’s two end stations. Newer trains (for example many Vande Bharat services) are missing.',
+      'It cannot check that your boarding and destination stations are on the train’s route, and it knows nothing about delays or platforms.',
+      'The lookup files download the first time you use them, so that first use needs internet.'
+    ])}
+    ${sec('Share card and text',[
+      'The theme is guessed from the destination name. Pick another if it’s wrong. Unknown places get the plain Classic theme.',
+      'The card shows destination, dates, route and counts only. The text version can include PNRs and addresses, so check it before sending.',
+      'Rarity badges are just for fun.'
+    ])}
+    ${sec('Safety',[
+      'Check-in reminders are calendar alerts for you. Compass has no server, so it cannot alert anyone if you miss a check-in.',
+      'Nothing is tracked or sent from your phone. Compass never shares your live location.'
+    ])}
+    ${sec('Sharing from Mail and WhatsApp',[
+      'iPhone web apps can’t be share targets, so it needs a one-time Shortcut. PDFs need a second step (attach in Compass).',
+      'Menu names in Mail and WhatsApp change between iOS versions.'
+    ])}
+    ${sec('Your data',[
+      'Everything is stored on this device. Safari tabs and the installed home-screen app keep separate copies.',
+      'Back up from the home screen now and then. Clearing website data or deleting the app erases your trips.'
+    ])}
+    <div class="sheet-actions"><button class="btn ghost" onclick="closeSheet()">Close</button></div>`);
 }
 function csvEscape(v){
   const s=String(v==null?'':v);
