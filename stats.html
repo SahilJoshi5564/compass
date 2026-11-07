@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Compass usage</title>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#f3f7f4;--panel:#fff;--ink:#14281f;--muted:#5c6f65;--green:#2c7a4b;--soft:#dcebe1;--rose:#b4543a}
+@media (prefers-color-scheme:dark){:root{--bg:#0e1a14;--panel:#16261d;--ink:#e6f1ea;--muted:#93a89b;--green:#5fc08a;--soft:#22382c;--rose:#e08a6e}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:Poppins,system-ui,sans-serif;padding:16px;max-width:760px;margin:0 auto}
+h1{font-size:22px;margin:8px 0 2px}h2{font-size:15px;margin:22px 0 8px}.muted{color:var(--muted);font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+.card{background:var(--panel);border-radius:14px;padding:14px;border:1px solid var(--soft)}
+.card .n{font-size:28px;font-weight:700}.card .l{font-size:12px;color:var(--muted)}
+input,button{box-sizing:border-box;font:inherit;padding:10px 12px;border-radius:10px;border:1px solid var(--soft);background:var(--panel);color:var(--ink)}
+button{background:var(--green);color:#fff;border:0;font-weight:600;cursor:pointer}
+table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;padding:6px 4px;border-bottom:1px solid var(--soft)}
+.bars{display:flex;align-items:flex-end;gap:2px;height:90px}.bars div{flex:1;background:var(--green);border-radius:3px 3px 0 0;min-height:2px}
+#err{color:var(--rose);font-size:13px;margin-top:8px}
+</style></head><body>
+<h1>Compass usage</h1>
+<div class="muted">Anonymous, opt-in counts only. Private: needs your stats token.</div>
+<div id="login" style="margin-top:14px;display:flex;gap:8px"><input id="tok" type="password" placeholder="Stats token" style="flex:1;min-width:0" autocomplete="off"><button onclick="go()">View</button></div>
+<div id="err"></div>
+<div id="out"></div>
+<script>
+const $=id=>document.getElementById(id);
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function bars(series,days){
+  const map={};series.forEach(r=>map[r.day]=r.n);
+  const out=[];for(let i=days-1;i>=0;i--){const d=new Date();d.setUTCDate(d.getUTCDate()-i);const k=d.toISOString().slice(0,10);out.push({k,n:map[k]||0});}
+  const max=Math.max(1,...out.map(o=>o.n));
+  return '<div class="bars">'+out.map(o=>`<div title="${o.k}: ${o.n}" style="height:${Math.max(2,o.n/max*100)}%"></div>`).join('')+'</div><div class="muted">Last '+days+' days. Peak '+max+'</div>';
+}
+function table(rows,cols){return '<table>'+rows.map(r=>'<tr>'+cols.map(c=>'<td>'+esc(r[c])+'</td>').join('')+'</tr>').join('')+'</table>';}
+async function go(){
+  const t=$('tok').value.trim()||sessionStorage.getItem('st')||'';
+  $('err').textContent='';
+  let res;
+  try{res=await fetch('/api/stats',{headers:{Authorization:'Bearer '+t}});}catch(e){$('err').textContent='Could not reach the server.';return;}
+  if(res.status===401){$('err').textContent='Wrong token.';sessionStorage.removeItem('st');return;}
+  if(!res.ok){$('err').textContent='Server error ('+res.status+'). Check the D1 binding.';return;}
+  sessionStorage.setItem('st',t);$('login').style.display='none';
+  const s=await res.json(),T=s.totals;
+  const pct=T.users?Math.round(T.installed/T.users*100):0;
+  $('out').innerHTML=`
+  <div class="grid" style="margin-top:14px">
+   <div class="card"><div class="n">${T.users}</div><div class="l">People who opted in (IDs)</div></div>
+   <div class="card"><div class="n">${T.installed}</div><div class="l">Opened from home screen (${pct}%)</div></div>
+   <div class="card"><div class="n">${T.dauToday}</div><div class="l">Active today</div></div>
+   <div class="card"><div class="n">${T.wau}</div><div class="l">Active last 7 days</div></div>
+   <div class="card"><div class="n">${T.mau}</div><div class="l">Active last 30 days</div></div>
+   <div class="card"><div class="n">${T.returning}</div><div class="l">Came back on 2+ days</div></div>
+  </div>
+  <h2>Daily active</h2><div class="card">${bars(s.dau,30)}</div>
+  <h2>New people per day</h2><div class="card">${bars(s.newUsers,30)}</div>
+  <h2>Features used (30 days)</h2><div class="card">${table(s.events.map(e=>({event:e.event,total:e.total,people:e.users})),['event','total','people'])}<div class="muted" style="margin-top:6px">event, times used, people who used it</div></div>
+  <h2>App versions</h2><div class="card">${table(s.versions,['version','n'])}</div>
+  <h2>Countries</h2><div class="card">${table(s.countries,['country','n'])}</div>
+  <p class="muted">Only people who turned on usage sharing are counted. One person can appear as two IDs (Safari and home-screen app keep separate storage, and reinstalling creates a new ID), so treat the numbers as estimates. Generated ${esc(s.generatedAt)}.</p>`;
+}
+if(sessionStorage.getItem('st')) go();
+$('tok').addEventListener('keydown',e=>{if(e.key==='Enter')go();});
+</script></body></html>

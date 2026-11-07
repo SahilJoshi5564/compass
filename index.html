@@ -1047,12 +1047,15 @@ async function migratePassportTasks(){
 async function init(){
   await openDB();
   await migratePassportTasks();
+  await loadAnalytics();
   if(location.hash.length>1){
     try{route=JSON.parse(decodeURIComponent(location.hash.slice(1)));}catch(e){}
   }
   lastHash=location.hash;
   await render();
   handleImportParam();
+  track('open');
+  flushAnalytics();
 }
 
 async function render(){
@@ -1083,7 +1086,7 @@ async function backupNudgeHTML(){
 }
 async function renderHome(){
   const trips=(await idAll('trips')).sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
-  const nudge=(await backupNudgeHTML())+(await shortcutNudgeHTML());
+  const nudge=(await backupNudgeHTML())+(await shortcutNudgeHTML())+usageNudgeHTML();
   const active=trips.filter(t=>tripStatus(t)==='active');
   const planned=trips.filter(t=>tripStatus(t)==='planned');
   const tentative=trips.filter(t=>tripStatus(t)==='tentative');
@@ -1844,6 +1847,7 @@ async function saveTrip(tripId){
     nav({view:'trip',id:trip.id,tab:'tasks'});
     return;
   }
+  if(!existing) track('trip_created');
   pickedSingle={}; closeSheet(); toast(existing?'Trip updated':(appliedTemplate?'Trip created — applied your saved template':'Trip created'));
   nav({view:'trip',id:trip.id,tab:existing?(route.tab||'tasks'):'tasks'});
 }
@@ -2679,7 +2683,7 @@ async function exportTripICS(tripId){
   const activities=await idAll('activities',tripId);
   const vevents=activities.map(activityToVEVENT).filter(Boolean);
   if(!vevents.length){ toast('No dated activities to export yet'); return; }
-  downloadICS(buildICS(vevents,trip.destination), (trip.destination||'trip').replace(/[^a-z0-9]+/gi,'-').toLowerCase()+'-itinerary.ics');
+  downloadICS(buildICS(vevents,trip.destination), (trip.destination||'trip').replace(/[^a-z0-9]+/gi,'-').toLowerCase()+'-itinerary.ics'); track('ics_export');
 }
 
 /* ---------------- Trip Share Card (solo-safety lite) ---------------- */
@@ -3005,7 +3009,7 @@ async function shareCardImage(){
   const blob=await cardBlob(); if(!blob){toast('Couldn’t build the image');return;}
   const file=new File([blob],cardFileName(),{type:'image/png'});
   if(navigator.canShare && navigator.canShare({files:[file]})){
-    try{ await navigator.share({files:[file],title:(cardState.trip.destination||'Trip')}); }
+    try{ await navigator.share({files:[file],title:(cardState.trip.destination||'Trip')}); track('card_shared'); }
     catch(e){ if(e&&e.name!=='AbortError') toast('Couldn’t open the share sheet — try Save'); }
   } else { saveCardImage(); }
 }
@@ -3014,7 +3018,7 @@ async function saveCardImage(){
   const url=URL.createObjectURL(blob), a=document.createElement('a');
   a.href=url; a.download=cardFileName(); a.click();
   setTimeout(()=>URL.revokeObjectURL(url),2000);
-  toast('Image saved');
+  toast('Image saved'); track('card_saved');
 }
 function showShareTab(which){
   document.getElementById('share-pane-card').classList.toggle('hidden',which!=='card');
@@ -3077,15 +3081,15 @@ async function refreshShareText(tripId){
 function currentShareText(){return (document.getElementById('f-share-text').value||'').trim();}
 async function shareTripCard(){
   const text=currentShareText();
-  try{ await navigator.share({text}); }
+  try{ await navigator.share({text}); track('text_shared'); }
   catch(e){ if(e&&e.name!=='AbortError') toast('Couldn’t open the share sheet — try Copy'); }
 }
 function shareTripWhatsApp(){
-  window.open('https://wa.me/?text='+encodeURIComponent(currentShareText()),'_blank');
+  window.open('https://wa.me/?text='+encodeURIComponent(currentShareText()),'_blank'); track('text_shared');
 }
 async function copyTripCard(){
   const text=currentShareText();
-  try{ await navigator.clipboard.writeText(text); toast('Copied'); }
+  try{ await navigator.clipboard.writeText(text); toast('Copied'); track('text_shared'); }
   catch(e){
     const ta=document.getElementById('f-share-text'); ta.select();
     toast('Select all and copy manually');
@@ -3097,7 +3101,7 @@ async function downloadCheckinICS(tripId){
   const time=document.getElementById('f-checkin-time').value||'21:00';
   const contact=document.getElementById('f-checkin-contact').value;
   const ics=buildCheckinICS(trip,time,contact);
-  downloadICS(ics,(trip.destination||'trip').replace(/[^a-z0-9]+/gi,'-').toLowerCase()+'-checkins.ics');
+  downloadICS(ics,(trip.destination||'trip').replace(/[^a-z0-9]+/gi,'-').toLowerCase()+'-checkins.ics'); track('checkin_ics');
 }
 
 /* ---------------- Import a booking (paste / share-sheet shortcut) ---------------- */
@@ -3276,6 +3280,7 @@ async function confirmImport(){
   closeSheet();
   if(!added){ toast('Nothing added'); return; }
   toast(added>1?added+' items added to your trip':'Added to your trip');
+  track('import_added'); if(importLegs.some(l=>l.irctc)) track('import_irctc'); if(importSource==='pdf') track('import_pdf');
   nav({view:'trip',id:tripId,tab:'activities'});
 }
 async function handleImportParam(){
@@ -3318,6 +3323,7 @@ async function copyImportLink(mode){
   catch(e){ toast('Couldn’t copy — long-press the link to copy it'); }
 }
 function openShortcutSetup(){
+  track('shortcut_guide');
   const textLink=importLink('clipboard'), fileLink=importLink('file');
   const step=(n,t)=>`<li style="margin-bottom:4px;">${t}</li>`;
   openSheet(`
@@ -3421,7 +3427,8 @@ function openLimitsSheet(){
     ])}
     ${sec('Safety',[
       'Check-in reminders are calendar alerts for you. Compass has no server, so it cannot alert anyone if you miss a check-in.',
-      'Nothing is tracked or sent from your phone. Compass never shares your live location.'
+      'Compass never tracks or shares your live location, and sends nothing about your trips.',
+      'Anonymous usage counts are only sent if you turn them on. <span class="nudge-link" style="text-decoration:underline;cursor:pointer;" onclick="openPrivacySheet()">See exactly what is sent</span>.'
     ])}
     ${sec('Sharing from Mail and WhatsApp',[
       'iPhone web apps can’t be share targets, so it needs a one-time Shortcut. PDFs need a second step (attach in Compass).',
@@ -3432,6 +3439,87 @@ function openLimitsSheet(){
       'Back up from the home screen now and then. Clearing website data or deleting the app erases your trips.'
     ])}
     <div class="sheet-actions"><button class="btn ghost" onclick="closeSheet()">Close</button></div>`);
+}
+
+/* ---------------- Anonymous usage sharing (opt-in) ---------------- */
+const APP_VERSION='v34';
+let ANALYTICS=null, openTracked=false, flushing=false;
+async function loadAnalytics(){
+  const r=await idGet('meta','analytics');
+  ANALYTICS=r||{key:'analytics',enabled:false,asked:false,id:null,queue:[]};
+  if(!Array.isArray(ANALYTICS.queue)) ANALYTICS.queue=[];
+}
+function saveAnalytics(){ return idPut('meta',ANALYTICS).catch(()=>{}); }
+function newAnonId(){
+  const a=new Uint8Array(12);
+  (window.crypto||self.crypto).getRandomValues(a);
+  return Array.from(a,b=>b.toString(16).padStart(2,'0')).join('');
+}
+function isStandalone(){
+  try{ return (navigator.standalone===true||(window.matchMedia&&window.matchMedia('(display-mode: standalone)').matches))?1:0; }catch(e){return 0;}
+}
+function track(name){
+  if(!ANALYTICS||!ANALYTICS.enabled||!ANALYTICS.id) return;
+  if(name==='open'){ if(openTracked) return; openTracked=true; }
+  ANALYTICS.queue.push({e:name,d:todayStr()});
+  if(ANALYTICS.queue.length>100) ANALYTICS.queue=ANALYTICS.queue.slice(-100);
+  saveAnalytics();
+  flushAnalytics();
+}
+async function flushAnalytics(){
+  if(flushing||!ANALYTICS||!ANALYTICS.enabled||!ANALYTICS.id||!ANALYTICS.queue.length) return;
+  if(typeof navigator!=='undefined' && navigator.onLine===false) return;
+  flushing=true;
+  const batch=ANALYTICS.queue.slice(0,50);
+  try{
+    const res=await fetch('/api/ping',{method:'POST',headers:{'content-type':'application/json'},keepalive:true,
+      body:JSON.stringify({id:ANALYTICS.id,v:APP_VERSION,sa:isStandalone(),events:batch})});
+    if(res.ok||res.status===400){ ANALYTICS.queue=ANALYTICS.queue.slice(batch.length); await saveAnalytics(); }
+  }catch(e){ /* stay queued, retry next time */ }
+  flushing=false;
+}
+async function setUsageSharing(on){
+  ANALYTICS.asked=true; ANALYTICS.enabled=!!on;
+  if(on){ if(!ANALYTICS.id) ANALYTICS.id=newAnonId(); }
+  else { ANALYTICS.id=null; ANALYTICS.queue=[]; openTracked=false; }
+  await saveAnalytics();
+  if(on) track('open');
+  toast(on?'Thanks. Usage sharing is on':'Usage sharing is off');
+  if(document.getElementById('usage-state')&&document.getElementById('overlay').classList.contains('open')) openPrivacySheet(); else render();
+}
+function usageNudgeHTML(){
+  if(!ANALYTICS||ANALYTICS.asked) return '';
+  return `<div class="backup-nudge">
+    <span>Help improve Compass? Share anonymous usage counts. No trip details.</span>
+    <span class="nudge-actions">
+      <span class="nudge-link" onclick="setUsageSharing(true)">Allow</span>
+      <span class="nudge-link" onclick="openPrivacySheet()">What's sent</span>
+      <span class="nudge-link" onclick="setUsageSharing(false)">No thanks</span>
+    </span>
+  </div>`;
+}
+function openPrivacySheet(){
+  const on=ANALYTICS&&ANALYTICS.enabled;
+  openSheet(`
+    <h3>${ICONS.file} Anonymous usage sharing</h3>
+    <div class="t2" id="usage-state" style="margin-bottom:10px;">Currently <b>${on?'on':'off'}</b>. It is off unless you turn it on.</div>
+    <div style="font-weight:600;margin:10px 0 4px;">What is sent</div>
+    <ul class="t2" style="padding-left:18px;line-height:1.55;margin:0;">
+      <li>A random ID made on this phone. It is not linked to your name, email or phone number.</li>
+      <li>The app version, and whether Compass was opened from the home screen or in Safari.</li>
+      <li>Simple event names with a date, for example "opened the app", "imported a booking" or "shared a card".</li>
+      <li>Your country, which the server infers from your connection. Your IP address is not stored in the usage database.</li>
+    </ul>
+    <div style="font-weight:600;margin:14px 0 4px;">What is never sent</div>
+    <ul class="t2" style="padding-left:18px;line-height:1.55;margin:0;">
+      <li>Trips, destinations, dates, bookings, PNRs, addresses, expenses, notes, files or passenger names.</li>
+      <li>Your location.</li>
+    </ul>
+    <div class="t2" style="margin-top:12px;">The numbers only tell the builder roughly how many people use Compass and which features get used. Turning it off stops sending and deletes the random ID from this phone. Counts already sent stay in the totals, but nothing links them to you. Events are held on the phone and sent when you are next online.</div>
+    <div class="sheet-actions">
+      <button class="btn ${on?'ghost':'primary'}" onclick="setUsageSharing(${on?'false':'true'})">${on?'Turn off':'Turn on'}</button>
+      <button class="btn ghost" onclick="closeSheet()">Close</button>
+    </div>`);
 }
 function csvEscape(v){
   const s=String(v==null?'':v);

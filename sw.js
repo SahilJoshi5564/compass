@@ -1,4 +1,4 @@
-const CACHE = 'compass-v33';
+const CACHE = 'compass-v34';
 const ASSETS = ['./', './index.html', './manifest.json', './refdata.json', './raildata.json', './icon.svg', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -21,6 +21,7 @@ self.addEventListener('activate', e => {
 // only fall back to the cache when the network is unavailable (offline use).
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
+  if (new URL(e.request.url).pathname.startsWith('/api/')) return; // never cache analytics or stats
   e.respondWith(
     fetch(e.request)
       .then(res => {
